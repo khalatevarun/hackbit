@@ -9,6 +9,13 @@ import {
   CardTitle,
 } from "@/components/ui/card";
 
+interface ContentSuggestion {
+  title: string;
+  url: string;
+  snippet: string;
+  published_date: string;
+}
+
 interface AgentMessage {
   id: string;
   from_agent: string;
@@ -16,6 +23,9 @@ interface AgentMessage {
   message: string;
   created_at: string;
   goal_id: string | null;
+  context?: {
+    content_suggestions?: ContentSuggestion[];
+  } | null;
 }
 
 interface AgentChatProps {
@@ -85,6 +95,24 @@ export function AgentChat({ messages }: AgentChatProps) {
             </Badge>
             <div className="flex-1 min-w-0">
               <p className="text-sm">{msg.message}</p>
+              {msg.context?.content_suggestions && msg.context.content_suggestions.length > 0 && (
+                <div className="mt-2 space-y-1">
+                  {msg.context.content_suggestions.map((link, i) => (
+                    <a
+                      key={i}
+                      href={link.url}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="block rounded border border-border bg-muted/50 px-2 py-1.5 hover:bg-muted transition-colors"
+                    >
+                      <p className="text-xs font-medium truncate">{link.title}</p>
+                      {link.snippet && (
+                        <p className="text-xs text-muted-foreground line-clamp-2 mt-0.5">{link.snippet}</p>
+                      )}
+                    </a>
+                  ))}
+                </div>
+              )}
               <p className="text-xs text-muted-foreground mt-1">
                 {new Date(msg.created_at).toLocaleString()}
               </p>

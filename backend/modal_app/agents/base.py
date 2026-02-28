@@ -19,6 +19,7 @@ class AgentResult:
         confidence: float = 0.5,
         context_summary: str = "",
         message_to_user: str | None = None,
+        content_suggestions: list[dict] | None = None,
     ):
         self.status = status
         self.next_action = next_action
@@ -26,6 +27,7 @@ class AgentResult:
         self.confidence = confidence
         self.context_summary = context_summary
         self.message_to_user = message_to_user
+        self.content_suggestions = content_suggestions or []
 
     def to_state(self) -> dict:
         return {
@@ -78,6 +80,33 @@ class BaseAgent(ABC):
             observation=observation,
             confidence=confidence,
         )
+
+    def get_peer_states(self, user_id: str, exclude_goal_id: str) -> str:
+        """Return a formatted summary of what other agents are currently thinking."""
+        states = db.get_agent_states_for_user(user_id)
+        lines = []
+        for s in states:
+            if s["goal_id"] == exclude_goal_id:
+                continue
+            state = s.get("state", {})
+            goal_info = s.get("goals") or {}
+            template = goal_info.get("agent_template", "unknown")
+            goal_name = goal_info.get("name", "unknown goal")
+            next_action = state.get("next_action", "monitor")
+            pattern = state.get("pattern_detected", "")
+            confidence = state.get("confidence", 0.0)
+            context = state.get("context_summary", "")
+            summary = f"- {template.capitalize()} companion ({goal_name}): {next_action}"
+            if confidence:
+                summary += f" (confidence {confidence:.2f})"
+            if pattern:
+                summary += f" — \"{pattern}\""
+            if context:
+                summary += f". Context: {context[:150]}"
+            lines.append(summary)
+        if not lines:
+            return "No other companions have recent states."
+        return "\n".join(lines)
 
     def llm_assess(self, system_prompt: str, user_prompt: str) -> dict:
         """Run an LLM assessment via the Modal GPU service and parse JSON."""

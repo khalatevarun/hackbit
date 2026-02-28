@@ -96,11 +96,33 @@ def get_recent_logs(
 # --------------- agent_states ---------------
 
 def upsert_agent_state(user_id: str, goal_id: str, state: dict) -> dict:
+    now = datetime.now(timezone.utc).isoformat()
+
+    # Fetch existing state_history to append to (keep last 7 entries)
+    existing = (
+        get_client()
+        .table("agent_states")
+        .select("state_history")
+        .eq("user_id", user_id)
+        .eq("goal_id", goal_id)
+        .execute()
+        .data
+    )
+    state_history: list[dict] = (existing[0].get("state_history") or []) if existing else []
+
+    new_entry = {
+        "next_action": state.get("next_action", "monitor"),
+        "confidence": state.get("confidence", 0.5),
+        "updated_at": now,
+    }
+    state_history = (state_history + [new_entry])[-7:]
+
     row = {
         "user_id": user_id,
         "goal_id": goal_id,
         "state": state,
-        "updated_at": datetime.now(timezone.utc).isoformat(),
+        "state_history": state_history,
+        "updated_at": now,
     }
     return (
         get_client()
@@ -142,6 +164,41 @@ def create_intervention(
     if goal_id:
         row["goal_id"] = goal_id
     return get_client().table("interventions").insert(row).execute().data[0]
+
+
+def get_recent_interventions(
+    user_id: str,
+    goal_id: str | None = None,
+    hours: int = 6,
+) -> list[dict]:
+    """Return interventions created within the last N hours for dedup check."""
+    from datetime import timedelta
+    cutoff = (datetime.now(timezone.utc) - timedelta(hours=hours)).isoformat()
+    q = (
+        get_client()
+        .table("interventions")
+        .select("*")
+        .eq("user_id", user_id)
+        .gte("scheduled_for", cutoff)
+    )
+    if goal_id:
+        q = q.eq("goal_id", goal_id)
+    return q.execute().data
+
+
+def mark_intervention_executed(intervention_id: str) -> None:
+    try:
+        get_client().table("interventions").update(
+            {
+                "executed": True,
+                "delivered_at": datetime.now(timezone.utc).isoformat(),
+            }
+        ).eq("id", intervention_id).execute()
+    except Exception:
+        # delivered_at column may not exist yet — fall back to just marking executed
+        get_client().table("interventions").update(
+            {"executed": True}
+        ).eq("id", intervention_id).execute()
 
 
 # --------------- agent_messages ---------------

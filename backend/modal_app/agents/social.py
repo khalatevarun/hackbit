@@ -29,43 +29,41 @@ Consider:
         min_social = config.get("min_social_per_week", 2)
 
         logs = self.get_logs(user_id, goal_id, days=14)
-        log_texts = [l["content"] for l in logs]
+        log_texts = [l["content"][:120] for l in logs[:8]]
 
         # Also check user-wide logs for emotional signals
         all_logs = self.get_logs(user_id, goal_id=None, days=7)
-        all_log_texts = [l["content"] for l in all_logs]
+        all_log_texts = [l["content"][:100] for l in all_logs[:6]]
 
         context = self.get_cross_context(
             user_id,
             "User's emotional state, stress mentions, isolation patterns, other agents' concerns",
         )
-        context_summary = "\n".join(c["content"] for c in context if c.get("content"))
+        context_summary = "\n".join(c["content"][:120] for c in context[:4] if c.get("content"))
 
-        # Check messages from other agents
-        from shared.supabase_client import get_agent_messages
-        other_agent_msgs = get_agent_messages(user_id, limit=20)
-        agent_concerns = [
-            m["message"] for m in other_agent_msgs
-            if m.get("to_agent") in (None, f"social:{goal_id}")
-        ]
+        peer_states = self.get_peer_states(user_id, goal_id)
 
-        prompt = f"""Goal: maintain at least {min_social} social activities per week
-Social activity logs (last 14 days): {log_texts}
-All recent logs (last 7 days, for emotional signals): {all_log_texts}
-Other agents' concerns/messages: {agent_concerns}
-Cross-domain context: {context_summary}
+        prompt = f"""Goal: {min_social} social activities/week
+Social logs: {log_texts}
+All recent logs: {all_log_texts}
+Context: {context_summary[:400]}
+Peers: {peer_states[:400]}
 
 How is the user's social and emotional wellbeing?"""
 
         assessment = self.llm_assess(self.SYSTEM_PROMPT, prompt)
 
+        next_action = assessment.get("next_action", "monitor")
+        content_suggestions: list[dict] = []
+
         result = AgentResult(
             status=assessment.get("status", "monitoring"),
-            next_action=assessment.get("next_action", "monitor"),
+            next_action=next_action,
             reasoning=assessment.get("reasoning", ""),
             confidence=assessment.get("confidence", 0.5),
             context_summary=context_summary[:500],
             message_to_user=assessment.get("message_to_user"),
+            content_suggestions=content_suggestions,
         )
 
         if result.status != "monitoring":

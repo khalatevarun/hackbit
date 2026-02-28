@@ -79,5 +79,18 @@ export async function POST(req: NextRequest) {
 
   const { data, error } = await supabase.from("user_logs").insert(row).select().single();
   if (error) return NextResponse.json({ error: error.message }, { status: 500 });
+
+  // Fire reactive tick — don't await, don't block response
+  const triggerUrl = process.env.MODAL_TRIGGER_URL_FOR_USER;
+  if (triggerUrl) {
+    fetch(triggerUrl, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ user_id: MOCK_USER_ID }),
+    }).catch(() => {
+      // Silently ignore — tick failure must not break log save
+    });
+  }
+
   return NextResponse.json(data, { status: 201 });
 }

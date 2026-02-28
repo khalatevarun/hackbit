@@ -29,29 +29,36 @@ Consider:
         categories = config.get("watch_categories", [])
 
         logs = self.get_logs(user_id, goal_id, days=14)
-        log_texts = [l["content"] for l in logs]
+        log_texts = [l["content"][:120] for l in logs[:10]]
 
         context = self.get_cross_context(
             user_id,
             "Is user stressed? Emotional state, sleep quality, recent life events",
         )
-        context_summary = "\n".join(c["content"] for c in context if c.get("content"))
+        context_summary = "\n".join(c["content"][:120] for c in context[:4] if c.get("content"))
 
-        prompt = f"""Goal config: weekly budget={budget}, watch categories={categories}
-Recent spending/activity logs (last 14 days): {log_texts}
-Cross-domain context: {context_summary}
+        peer_states = self.get_peer_states(user_id, goal_id)
 
-Analyze the user's spending patterns."""
+        prompt = f"""Goal: budget={budget}, watch={categories}
+Recent logs: {log_texts}
+Context: {context_summary[:400]}
+Peers: {peer_states[:400]}
+
+Analyze spending patterns."""
 
         assessment = self.llm_assess(self.SYSTEM_PROMPT, prompt)
 
+        next_action = assessment.get("next_action", "monitor")
+        content_suggestions: list[dict] = []
+
         result = AgentResult(
             status=assessment.get("status", "monitoring"),
-            next_action=assessment.get("next_action", "monitor"),
+            next_action=next_action,
             reasoning=assessment.get("reasoning", ""),
             confidence=assessment.get("confidence", 0.5),
             context_summary=context_summary[:500],
             message_to_user=assessment.get("message_to_user"),
+            content_suggestions=content_suggestions,
         )
 
         if result.status != "monitoring":

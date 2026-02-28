@@ -21,6 +21,7 @@ Consider:
 - If sleep is poor, be gentler (suggest light activity instead of intense workout)
 - If stress is high, acknowledge it and suggest exercise as stress relief, not obligation
 - Celebrate consistency and wins enthusiastically
+- If another companion is already escalating, don't also escalate — suggest supportive rest/light activity instead
 """
 
     def analyze(self, user_id: str, goal_id: str, config: dict) -> AgentResult:
@@ -28,30 +29,37 @@ Consider:
         activity = config.get("target", "workout")
 
         logs = self.get_logs(user_id, goal_id, days=7)
-        log_texts = [l["content"] for l in logs]
+        log_texts = [l["content"][:120] for l in logs[:10]]
 
         context = self.get_cross_context(
             user_id,
-            f"User's sleep quality, stress level, and emotional state this week",
+            "User's sleep quality, stress level, and emotional state this week",
         )
-        context_summary = "\n".join(c["content"] for c in context if c.get("content"))
+        context_summary = "\n".join(c["content"][:120] for c in context[:4] if c.get("content"))
+
+        peer_states = self.get_peer_states(user_id, goal_id)
 
         assessment = self.llm_assess(
             self.SYSTEM_PROMPT,
             f"""Goal: {activity} {freq}x per week
-Recent activity logs (last 7 days): {log_texts}
-Cross-domain context: {context_summary}
+Recent logs (last 7 days): {log_texts}
+Context: {context_summary[:400]}
+Peers: {peer_states[:400]}
 
 How is the user doing with their fitness goal?""",
         )
 
+        next_action = assessment.get("next_action", "monitor")
+        content_suggestions: list[dict] = []
+
         result = AgentResult(
             status=assessment.get("status", "monitoring"),
-            next_action=assessment.get("next_action", "monitor"),
+            next_action=next_action,
             reasoning=assessment.get("reasoning", ""),
             confidence=assessment.get("confidence", 0.5),
             context_summary=context_summary[:500],
             message_to_user=assessment.get("message_to_user"),
+            content_suggestions=content_suggestions,
         )
 
         if result.status != "monitoring":

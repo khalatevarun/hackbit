@@ -1,27 +1,22 @@
 """
-Demo seed script for LifeOS hackathon.
+Demo seed script for LifeOS.
 
-Story: "The Burnout Spiral"
-A developer is 7 days out from a hackathon deadline. Everything starts
-fine. Then deadline pressure hits: sleep collapses first, then workouts
-stop, then stress-spending spikes, then friends get ghosted.
+Story: "The ML Assignment That Ate My Life"
+A CS junior is juggling five life goals — sleep, running, budget, staying social,
+and finishing an ML assignment due Friday. The first week is solid. Then the
+assignment drops and everything slowly falls apart in the most relatable way possible.
 
-5 agents monitor 5 domains. They ALL want to intervene at once.
-The coordinator has to negotiate: sleep wins, everyone else backs off.
-
-This creates visible, dramatic agent conflict — perfect for a demo.
-
-Goals:
-  1. Sleep 8h/night         (sleep agent)        — PRIMARY concern
-  2. Gym 3x/week            (fitness agent)       — wants to push, sleep says no
-  3. Spend < $300/week      (money agent)         — sees stress-spending spike
-  4. Call friends 2x/week   (social agent)        — sees isolation pattern
-  5. Submit hackathon       (short_lived agent)   — deadline pressure, root cause
+5 agents monitor 5 domains:
+  1. Sleep 7h/night          (sleep agent)       — bedtime creeping later every night
+  2. Run 4x/week             (fitness agent)     — training for a 5K in 3 weeks
+  3. Budget $150/week        (money agent)       — watches food delivery + coffee
+  4. Stay social 3x/week     (social agent)      — family calls, roommate hangouts
+  5. Submit ML assignment    (short_lived agent) — due in 3 days, barely started
 
 Usage:
     cd backend
     python seed_demo.py           # add goals + logs
-    python seed_demo.py --reset   # wipe existing data first, then seed
+    python seed_demo.py --reset   # wipe everything first, then seed
 """
 from __future__ import annotations
 
@@ -58,137 +53,162 @@ def seed(do_reset: bool = False):
     if do_reset:
         reset(client)
 
-    print("Seeding 'Burnout Spiral' demo scenario...\n")
+    print("Seeding 'The ML Assignment That Ate My Life' scenario...\n")
 
     # ------------------------------------------------------------------
-    # 1. Goals — five interconnected domains
+    # 1. Goals
     # ------------------------------------------------------------------
     print("Creating goals...")
 
     sleep_goal = db.create_goal(
         user_id=MOCK_USER_ID,
-        name="Sleep 8h/night",
+        name="Sleep 7h/night",
         goal_type="habit",
         agent_template="sleep",
-        config={"target_hours": 8, "target_bedtime": "23:00"},
+        config={"target_hours": 7, "target_bedtime": "23:30"},
     )
 
     fitness_goal = db.create_goal(
         user_id=MOCK_USER_ID,
-        name="Gym 3x/week",
+        name="Run 4x/week (training for 5K)",
         goal_type="habit",
         agent_template="fitness",
-        config={"frequency_per_week": 3, "target": "strength training"},
+        config={"frequency_per_week": 4, "target": "running"},
     )
 
     money_goal = db.create_goal(
         user_id=MOCK_USER_ID,
-        name="Keep weekly spend under $300",
+        name="Stay under $150/week",
         goal_type="habit",
         agent_template="money",
-        config={"weekly_budget": 300, "watch_categories": ["food delivery", "impulse buys"]},
+        config={"weekly_budget": 150, "watch_categories": ["food delivery", "coffee", "snacks"]},
     )
 
     social_goal = db.create_goal(
         user_id=MOCK_USER_ID,
-        name="Connect with friends 2x/week",
+        name="Stay connected — family + friends 3x/week",
         goal_type="habit",
         agent_template="social",
-        config={"min_social_per_week": 2},
+        config={"min_social_per_week": 3},
     )
 
-    hackathon_goal = db.create_goal(
+    assignment_goal = db.create_goal(
         user_id=MOCK_USER_ID,
-        name="Submit hackathon project",
+        name="Submit ML assignment (due Friday)",
         goal_type="short_lived",
         agent_template="short_lived",
         config={
-            "end_date": (now + timedelta(days=2)).strftime("%Y-%m-%d"),
-            "success_criteria": "Ship a working LifeOS demo with Supermemory + Modal integration",
+            "end_date": (now + timedelta(days=3)).strftime("%Y-%m-%d"),
+            "success_criteria": (
+                "Implement a multi-class classifier on the CIFAR-10 dataset, "
+                "write a 4-page report, and submit to Gradescope by Friday 11:59pm"
+            ),
         },
-        end_at=(now + timedelta(days=2)).isoformat(),
+        end_at=(now + timedelta(days=3)).isoformat(),
     )
 
     sid  = sleep_goal["id"]
     fid  = fitness_goal["id"]
     mid  = money_goal["id"]
     soid = social_goal["id"]
-    hid  = hackathon_goal["id"]
+    aid  = assignment_goal["id"]
 
-    print(f"  Sleep:      {sid}")
-    print(f"  Fitness:    {fid}")
-    print(f"  Money:      {mid}")
-    print(f"  Social:     {soid}")
-    print(f"  Hackathon:  {hid}\n")
+    print(f"  Sleep:       {sid}")
+    print(f"  Fitness:     {fid}")
+    print(f"  Money:       {mid}")
+    print(f"  Social:      {soid}")
+    print(f"  Assignment:  {aid}\n")
 
     # ------------------------------------------------------------------
-    # 2. Logs — 7-day burnout arc
+    # 2. Logs — 10-day student arc
     #
-    # Day 7-6: Everything good. User is energised, social, on-budget.
-    # Day 5:   Hackathon crunch begins. First sign of strain.
-    # Day 4:   Sleep drops below 6h. Gym skipped. First food delivery.
-    # Day 3:   4h sleep. Stress-spending. Cancelled on friends.
-    # Day 2:   3h sleep. Body failing. Impulse buys. Ghosting everyone.
-    # Day 1:   2.5h sleep. Complete collapse. Deadline in 2 days.
+    # Days 10-8: Solid week. Runs, decent sleep, under budget, social.
+    # Days 7-5:  Assignment released. Things slip a little but manageable.
+    # Days 4-3:  Assignment panic. Sleep drops, runs stop, food delivery spikes.
+    # Days 2-1:  Full crunch. 4h sleep, zero exercise, way over budget, ghosting everyone.
     # ------------------------------------------------------------------
 
-    def at(days_back: int, hour: int = 20) -> str:
+    def at(days_back: int, hour: int = 20, minute: int = 0) -> str:
         return (now - timedelta(days=days_back)).replace(
-            hour=hour, minute=0, second=0, microsecond=0
+            hour=hour, minute=minute, second=0, microsecond=0
         ).isoformat()
 
     logs = [
-        # ── Day 7: baseline, everything green ────────────────────────
-        (at(7, 7),  sid,  "Slept 8.5h. Bed by 10:30pm, woke up naturally. Feeling sharp."),
-        (at(7, 18), fid,  "Crushed a 60-min strength session — bench, squat, deadlift. New PR on squat!"),
-        (at(7, 19), mid,  "Cooked at home all week. Groceries: $58. Well under budget."),
-        (at(7, 20), soid, "Dinner with Priya and Marcus. Laughed a lot. Needed that."),
-        (at(7, 21), hid,  "Set up repo and architecture for hackathon project. Clean start. Excited."),
+        # ── Day 10: strong start ──────────────────────────────────────
+        (at(10, 7),  sid,  "Woke up without an alarm at 7am. 7.5h. Starting the week right."),
+        (at(10, 8),  fid,  "5K morning run. 28:14. Legs felt light, really happy with the pace."),
+        (at(10, 13), mid,  "Made pasta at home. Rice + dal for dinner. Spent basically nothing today."),
+        (at(10, 19), soid, "Called mom and dad for like 45 mins. Dad is learning to use Reels, absolute chaos."),
+        (at(10, 21), aid,  "Did the week's lecture readings on SVMs and backprop. Feeling prepared."),
 
-        # ── Day 6: still good ─────────────────────────────────────────
-        (at(6, 7),  sid,  "8 hours. Bed by 11pm. Feeling rested."),
-        (at(6, 12), fid,  "Rest day. Did a 20-min walk. Legs recovering well."),
-        (at(6, 19), mid,  "Lunch out with a friend: $22. Nothing else."),
-        (at(6, 20), soid, "Long phone call with Jake. Good to catch up."),
-        (at(6, 21), hid,  "Frontend mostly done. 25% complete. Moving fast."),
+        # ── Day 9: still on track ─────────────────────────────────────
+        (at(9, 7),   sid,  "7h exactly. Bed by 11:30, up at 6:30. Not bad."),
+        (at(9, 17),  fid,  "Ran 4K with Rohan from the dorm. He's way faster than me but good push."),
+        (at(9, 12),  mid,  "Grabbed coffee from the campus cafe: $3.50. Cooked everything else."),
+        (at(9, 20),  soid, "Study group with Anika and Dev. Mostly actual studying with some venting about Prof Chen."),
+        (at(9, 22),  aid,  "Reviewed last year's assignment solutions. The CIFAR dataset is huge, need to plan carefully."),
 
-        # ── Day 5: deadline pressure kicks in ─────────────────────────
-        (at(5, 7),  sid,  "6.5h. Stayed up late reviewing API docs. Mind was busy."),
-        (at(5, 17), fid,  "Skipped gym. Got absorbed in coding. Told myself I'd go tomorrow."),
-        (at(5, 19), mid,  "Ordered DoorDash — too tired to cook. $34."),
-        (at(5, 20), None, "Realised the hackathon deadline is tighter than I thought. Need to push."),
-        (at(5, 21), hid,  "Backend API taking longer than expected. Supermemory integration is tricky. 40% done."),
+        # ── Day 8: rest + social day ──────────────────────────────────
+        (at(8, 9),   sid,  "8h on a Saturday, deserved it. Felt amazing."),
+        (at(8, 11),  fid,  "Rest day. Did a 20-min stretch. Shins a bit sore from yesterday."),
+        (at(8, 13),  mid,  "Groceries: $42. Stocked up for the week. Good."),
+        (at(8, 16),  soid, "Went to the farmers market with roommates Priya and Sam. Bought a mango. Life is okay."),
+        (at(8, 20),  soid, "Movie night in the dorm common room. Three of us watched Interstellar for the fourth time."),
 
-        # ── Day 4: sliding fast ────────────────────────────────────────
-        (at(4, 7),  sid,  "4.5h. Worked until 2am. Had coffee at 9pm — terrible idea. Feel foggy."),
-        (at(4, 10), fid,  "Skipped gym again. Can't justify it with the deadline. Second miss this week."),
-        (at(4, 13), mid,  "DoorDash twice today: $52. Also bought a mechanical keyboard I didn't need: $89."),
-        (at(4, 18), soid, "Cancelled dinner with friends. Said I had to work. They were disappointed."),
-        (at(4, 21), hid,  "Supermemory search is working! 60% done but burning out fast."),
+        # ── Day 7: assignment drops Monday morning ────────────────────
+        (at(7, 8),   sid,  "7h. Woke up and immediately saw the assignment email. Due Friday. Okay. Okay."),
+        (at(7, 10),  fid,  "Ran 3K but cut it short to get started on the assignment. Legs felt heavy anyway."),
+        (at(7, 14),  mid,  "Coffee at the library: $4.75. Worth it, got a solid 3h block in."),
+        (at(7, 19),  soid, "Quick lunch with Anika. Complained about the assignment. She has a stats exam. We're both cooked."),
+        (at(7, 22),  aid,  "Set up the repo, downloaded CIFAR-10, got training loop running. ~15% done. This is doable."),
 
-        # ── Day 3: this is a crisis ────────────────────────────────────
-        (at(3, 7),  sid,  "3.5h. Woke up at 4:30am with anxiety about the demo. Heart racing."),
-        (at(3, 12), fid,  "No workout. Headache all day. Body feels like concrete."),
-        (at(3, 14), mid,  "Coffee shop 3x: $24. DoorDash again: $47. Stress-bought noise cancelling headphones: $120."),
-        (at(3, 17), soid, "Didn't reply to any messages today. Group chat asking if I'm okay. Ignored it."),
-        (at(3, 21), hid,  "Got Modal deployment working. 75% done. Making stupid mistakes because I'm exhausted."),
-        (at(3, 22), None, "Drank 5 coffees today. Hands are shaking. This is not sustainable."),
+        # ── Day 6: optimistic but starting to slip ────────────────────
+        (at(6, 7),   sid,  "6.5h. Stayed up till 1am debugging. Not a disaster but felt it this morning."),
+        (at(6, 10),  fid,  "Skipped the run. Told myself I'd go in the evening. (I didn't go in the evening.)"),
+        (at(6, 13),  mid,  "Ordered Chipotle because I didn't meal prep. $13.50. Whatever, one time."),
+        (at(6, 16),  aid,  "Data augmentation is NOT working the way I expected. Spent 4h on one bug. 25% done."),
+        (at(6, 21),  soid, "Replied to the group chat at least. Told them I'm buried in the assignment. They understand."),
 
-        # ── Day 2: hitting the wall ────────────────────────────────────
-        (at(2, 7),  sid,  "3h. Kept jolting awake. Completely exhausted but can't stay asleep."),
-        (at(2, 11), fid,  "Tried 10 pushups. Could barely do 5. Gave up. Body is completely depleted."),
-        (at(2, 14), mid,  "Ordered food 3x: $78. Total spend this week already at $410 — way over $300 budget."),
-        (at(2, 16), soid, "Friend texted asking if I'm okay. Said 'yes just busy' but I'm not okay."),
-        (at(2, 20), hid,  "85% done. Deadline in 2 days. Making silly bugs. Need to sleep but can't stop."),
-        (at(2, 22), None, "Feeling really anxious and low. Can't tell if the project is good or terrible anymore."),
+        # ── Day 5: the grind is real ──────────────────────────────────
+        (at(5, 7),   sid,  "5.5h. Went to bed at 2am, couldn't sleep, brain still running through model architectures."),
+        (at(5, 12),  fid,  "No run. Honestly forgot it was a run day until right now writing this."),
+        (at(5, 13),  mid,  "DoorDash $18. Also bought two Red Bulls from the vending machine ($5). This is how it starts."),
+        (at(5, 15),  None, "The TA's office hours were useless. He basically just read the assignment PDF back at me."),
+        (at(5, 19),  aid,  "Finally got 71% validation accuracy with ResNet-style architecture. 50% done. Report not started."),
+        (at(5, 23),  sid,  "It's 11pm and I'm still at the library. Heading back now. This is fine."),
 
-        # ── Day 1: complete collapse ───────────────────────────────────
-        (at(1, 7),  sid,  "2.5h sleep. Woke up at 5am, couldn't go back to sleep. Feel genuinely unwell."),
-        (at(1, 10), fid,  "Zero workout capacity. Barely walked to the kitchen. This is day 4 of no gym."),
-        (at(1, 12), mid,  "Red Bull x4: $16. More DoorDash: $55. I've stopped tracking — I know it's bad."),
-        (at(1, 14), soid, "Cancelled video call with family. They sounded worried. I feel guilty."),
-        (at(1, 16), hid,  "90% done. One big bug left. Deadline tomorrow. I need to push through tonight."),
-        (at(1, 20), None, "Running on fumes. Head hurts. Eyes are dry. I know I need sleep but I'm scared to stop."),
+        # ── Day 4: sliding ────────────────────────────────────────────
+        (at(4, 8),   sid,  "5h. Eyes hurt. Had a dream about gradient descent which is genuinely embarrassing."),
+        (at(4, 9),   fid,  "Third skipped run in a row. I keep telling myself it's temporary. Starting to feel it though — stiff and sluggish."),
+        (at(4, 12),  mid,  "DoorDash for lunch AND dinner: $32. Also four coffees at the library cafe: $18. Weekly total already at $120."),
+        (at(4, 15),  soid, "Mom called. I let it go to voicemail. Feel terrible about it. Will call her tomorrow. (I probably won't.)"),
+        (at(4, 20),  aid,  "Model at 79% accuracy. Trying to push past 80 for a better grade. Spent 5h on hyperparameter tweaks. 65% done."),
+        (at(4, 23),  None, "Ate dinner at 11pm. Two granola bars and a Red Bull. This is my life now."),
+
+        # ── Day 3: crisis mode ────────────────────────────────────────
+        (at(3, 7),   sid,  "4h. Woke up at 5am with a specific anxiety about the softmax layer. Actually got up and fixed it."),
+        (at(3, 9),   fid,  "Noticed I haven't moved properly in four days. Walked to class and back, that's it. Calves are weirdly tight."),
+        (at(3, 11),  mid,  "Dunkin twice: $11. DoorDash again for dinner: $22. I don't even remember deciding to order. Just did it."),
+        (at(3, 14),  soid, "Dev texted asking if I'm coming to lunch. Said I was stuck in lab. He brought me a sandwich. Good guy."),
+        (at(3, 17),  aid,  "80.3% accuracy! But I still need to write the full 4-page report. Due in two days. Not okay. 70% done, 0% of report done."),
+        (at(3, 22),  None, "Stress level: extremely elevated. Opened Twitter to 'take a break' and lost 40 minutes. Classic."),
+
+        # ── Day 2: wall ───────────────────────────────────────────────
+        (at(2, 7),   sid,  "3.5h. Went to bed at 3am, alarm at 6:30. Head is pounding. This is bad."),
+        (at(2, 10),  fid,  "Zero exercise. Week 2 with basically no runs. I can feel my fitness slipping. The 5K is in 3 weeks and I'm falling apart."),
+        (at(2, 12),  mid,  "Weekly budget: $148 already and it's only Wednesday. Red Bull 4-pack: $12. More DoorDash: $24."),
+        (at(2, 14),  soid, "Priya knocked on my door to check on me. I was in my chair, unwashed, staring at a loss curve. She looked concerned."),
+        (at(2, 16),  aid,  "Report: 1.5 pages done out of 4. Model is solid. But the writing is so slow when I'm this tired. 80% done. Due tomorrow."),
+        (at(2, 21),  None, "I genuinely cannot tell if I'm being productive or just sitting at my desk looking at code. It all blurs together."),
+        (at(2, 23),  sid,  "It's midnight. I need to write 2.5 more pages. I'm going to be up all night. This is my fault and I know it."),
+
+        # ── Day 1: crunch day ─────────────────────────────────────────
+        (at(1, 5),   sid,  "2h sleep. Pulled an all-nighter. Submitted the assignment at 4:47am with 74 minutes to spare."),
+        (at(1, 7),   fid,  "Haven't run in 6 days. Body feels like a used paper bag. Walked to get breakfast and felt winded."),
+        (at(1, 9),   mid,  "Total spend this week: $187. $37 over budget. That's what happens when every meal is DoorDash or vending machine."),
+        (at(1, 11),  soid, "Called mom back finally. She immediately said I sounded awful. I started crying a little on the phone. She was nice about it."),
+        (at(1, 12),  aid,  "Assignment submitted. Final accuracy: 80.3%. Report was rough but complete. Now I need to sleep for 12 hours."),
+        (at(1, 14),  None, "Slept from noon to 6pm. Woke up feeling like a different person. I really need to not let it get that bad again."),
     ]
 
     print(f"Inserting {len(logs)} log entries...")
@@ -205,37 +225,45 @@ def seed(do_reset: bool = False):
 
     print("Done.\n")
     print("=" * 65)
-    print("DEMO SCENARIO: 'The Burnout Spiral'")
+    print("DEMO SCENARIO: 'The ML Assignment That Ate My Life'")
     print("=" * 65)
     print()
     print("5 goals created:")
-    print(f"  Sleep      → {sid[:8]}...")
-    print(f"  Fitness    → {fid[:8]}...")
-    print(f"  Money      → {mid[:8]}...")
-    print(f"  Social     → {soid[:8]}...")
-    print(f"  Hackathon  → {hid[:8]}...  (deadline: {(now + timedelta(days=2)).strftime('%b %d')})")
+    print(f"  Sleep       → {sid[:8]}...")
+    print(f"  Fitness     → {fid[:8]}...")
+    print(f"  Money       → {mid[:8]}...")
+    print(f"  Social      → {soid[:8]}...")
+    print(f"  Assignment  → {aid[:8]}...  (due: {(now + timedelta(days=3)).strftime('%A %b %d')})")
+    print()
+    print(f"  {len(logs)} log entries across 10 days")
+    print()
+    print("WHAT TO EXPECT FROM AGENTS:")
+    print()
+    print("  Sleep:      Flags 6 consecutive nights under 6h. Asks")
+    print("              fitness + social to ease off. Highest priority.")
+    print()
+    print("  Fitness:    Sees 6 skipped runs. But reads sleep state →")
+    print("              backs off the push, suggests a walk instead.")
+    print()
+    print("  Money:      Spots the DoorDash spiral + Red Bull pattern.")
+    print("              Connects it to stress from the assignment.")
+    print()
+    print("  Social:     Notices mom's missed call + isolation pattern.")
+    print("              Flags that user replied to texts but avoids calls.")
+    print()
+    print("  Assignment: Due in 3 days, 80%+ done. Nudges on the report.")
+    print("              Coordinates with sleep — won't push if sleep is critical.")
+    print()
+    print("  Coordinator: Sleep wins. One message, not five.")
+    print("               Surfaces Exa links on healthy crunch habits.")
     print()
     print("DEMO SCRIPT:")
-    print()
-    print("  1. Show 5 active goals with their coloured badges.")
-    print("  2. Click 'Run Agents' — watch the chat fill up.")
-    print("  3. Point to Sleep agent: it flags 5 nights <4h and tells")
-    print("     other agents to ease off.")
-    print("  4. Point to Fitness agent: it saw the sleep context from")
-    print("     Supermemory and softened its advice automatically.")
-    print("  5. Point to Money agent: it connected stress → overspending.")
-    print("  6. Point to Coordinator: it resolves the conflict —")
-    print("     sleep > everything. Each agent gets specific instructions.")
-    print("  7. Expand 'Agent Memory' — show Supermemory context that")
-    print("     each agent retrieved (the cross-domain intelligence).")
-    print("  8. Click 'Run Agents' again — second run shows agents")
-    print("     adjusting based on memory from the first run.")
-    print()
-    print("KEY TALKING POINTS:")
-    print("  • Modal: parallel agent execution on a cron, zero ops")
-    print("  • Supermemory: agents share memory across domains —")
-    print("    fitness agent knows about your sleep without being told")
-    print("  • Coordinator pattern: LLM arbitrates conflicts between agents")
+    print("  1. Show 5 active goals.")
+    print("  2. Click 'Check in now' — companions respond.")
+    print("  3. Show Exa link cards under sleep/fitness messages.")
+    print("  4. Send a message to @hackbitz_bot: 'finally slept 7h last night'")
+    print("  5. Watch the bot reply — agents update their assessment.")
+    print("  6. Expand 'Why they said that' to show cross-agent awareness.")
     print("=" * 65)
 
 
