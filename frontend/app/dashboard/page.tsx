@@ -67,34 +67,59 @@ const TEMPLATE_COLOR: Record<string, string> = {
   custom:      "bg-gray-100 text-gray-800",
 };
 
+const API_TIMEOUT_MS = 12_000;
+
+function fetchWithTimeout(url: string, options?: RequestInit): Promise<Response> {
+  const ctrl = new AbortController();
+  const id = setTimeout(() => ctrl.abort(), API_TIMEOUT_MS);
+  return fetch(url, { ...options, signal: ctrl.signal }).finally(() => clearTimeout(id));
+}
+
 export default function DashboardPage() {
   const [goals, setGoals] = useState<Goal[]>([]);
   const [logs, setLogs] = useState<LogEntry[]>([]);
   const [messages, setMessages] = useState<AgentMessage[]>([]);
   const [agentStates, setAgentStates] = useState<AgentState[]>([]);
+  const [loading, setLoading] = useState(true);
   const [ticking, setTicking] = useState(false);
   const [tickResult, setTickResult] = useState<string | null>(null);
   const [demoLoading, setDemoLoading] = useState(false);
   const [demoResult, setDemoResult] = useState<string | null>(null);
 
   const fetchGoals = useCallback(async () => {
-    const res = await fetch("/api/goals");
-    if (res.ok) setGoals(await res.json());
+    try {
+      const res = await fetchWithTimeout("/api/goals");
+      if (res.ok) setGoals(await res.json());
+    } catch {
+      setGoals([]);
+    }
   }, []);
 
   const fetchLogs = useCallback(async () => {
-    const res = await fetch("/api/logs");
-    if (res.ok) setLogs(await res.json());
+    try {
+      const res = await fetchWithTimeout("/api/logs");
+      if (res.ok) setLogs(await res.json());
+    } catch {
+      setLogs([]);
+    }
   }, []);
 
   const fetchMessages = useCallback(async () => {
-    const res = await fetch("/api/agent-messages");
-    if (res.ok) setMessages(await res.json());
+    try {
+      const res = await fetchWithTimeout("/api/agent-messages");
+      if (res.ok) setMessages(await res.json());
+    } catch {
+      setMessages([]);
+    }
   }, []);
 
   const fetchAgentStates = useCallback(async () => {
-    const res = await fetch("/api/agent-states");
-    if (res.ok) setAgentStates(await res.json());
+    try {
+      const res = await fetchWithTimeout("/api/agent-states");
+      if (res.ok) setAgentStates(await res.json());
+    } catch {
+      setAgentStates([]);
+    }
   }, []);
 
   const triggerTick = useCallback(async () => {
@@ -158,64 +183,42 @@ export default function DashboardPage() {
   }, []);
 
   useEffect(() => {
-    fetchGoals();
-    fetchLogs();
-    fetchMessages();
-    fetchAgentStates();
+    setLoading(true);
+    Promise.allSettled([
+      fetchGoals(),
+      fetchLogs(),
+      fetchMessages(),
+      fetchAgentStates(),
+    ]).finally(() => setLoading(false));
   }, [fetchGoals, fetchLogs, fetchMessages, fetchAgentStates]);
 
   const activeGoals = goals.filter((g) => g.active);
 
+  if (loading) {
+    return (
+      <div className="min-h-screen bg-background flex items-center justify-center">
+        <div className="text-center space-y-3">
+          <p className="text-muted-foreground">Loading dashboard…</p>
+          <p className="text-xs text-muted-foreground">Fetching goals, logs, and companion messages</p>
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div className="min-h-screen bg-background">
       <header className="border-b">
-        <div className="container mx-auto px-4 py-4 flex items-center justify-between flex-wrap gap-3">
-          <div className="flex items-center gap-4">
-            <Link href="/" className="text-sm text-muted-foreground hover:text-foreground">
+        <div className="container mx-auto px-4 py-4">
+          <div className="flex items-center gap-4 min-w-0">
+            <Link href="/" className="text-sm text-muted-foreground hover:text-foreground shrink-0">
               Home
             </Link>
-            <div>
-              <h1 className="text-2xl font-bold tracking-tight">HACKBITZ</h1>
-              <p className="text-sm text-muted-foreground">
-                A set of companions that keep you accountable — across every part of your life.
+            <div className="min-w-0">
+              <h1 className="text-xl font-bold tracking-tight truncate">HACKBITZ</h1>
+              <p className="text-xs text-muted-foreground truncate">
+                Companions that keep you accountable across your life.
               </p>
             </div>
-          </div>
-          <div className="flex items-center gap-3 flex-wrap">
-            {tickResult && (
-              <span className="text-xs text-muted-foreground">{tickResult}</span>
-            )}
-            <Button onClick={triggerTick} disabled={ticking} size="sm" variant="outline">
-              {ticking ? "Checking in…" : "Check in now"}
-            </Button>
-            <span className="text-xs text-muted-foreground">Demo:</span>
-            <Button
-              onClick={() => triggerDemo("nightly_summary")}
-              disabled={demoLoading}
-              size="sm"
-              variant="secondary"
-            >
-              Send nightly summary
-            </Button>
-            <Button
-              onClick={() => triggerDemo("proactive_nudges")}
-              disabled={demoLoading}
-              size="sm"
-              variant="secondary"
-            >
-              Send proactive nudges
-            </Button>
-            <Button
-              onClick={() => triggerDemo("checkin")}
-              disabled={demoLoading}
-              size="sm"
-              variant="secondary"
-            >
-              Send check-in to Telegram
-            </Button>
-            {demoResult && (
-              <span className="text-xs text-muted-foreground w-full basis-full">{demoResult}</span>
-            )}
           </div>
         </div>
       </header>
@@ -328,6 +331,43 @@ export default function DashboardPage() {
             <AgentMemory states={agentStates} />
           </div>
         </div>
+
+        {/* Actions section at the bottom */}
+        <section className="mt-12 pt-8 border-t">
+          <h2 className="text-sm font-medium text-muted-foreground mb-3">Actions</h2>
+          <div className="flex flex-wrap gap-2">
+            <Button onClick={triggerTick} disabled={ticking} size="sm" variant="default">
+              {ticking ? "Checking in…" : "Check in now"}
+            </Button>
+            <Button
+              onClick={() => triggerDemo("nightly_summary")}
+              disabled={demoLoading}
+              size="sm"
+              variant="outline"
+            >
+              Send nightly summary
+            </Button>
+            <Button
+              onClick={() => triggerDemo("proactive_nudges")}
+              disabled={demoLoading}
+              size="sm"
+              variant="outline"
+            >
+              Send proactive nudges
+            </Button>
+            <Button
+              onClick={() => triggerDemo("checkin")}
+              disabled={demoLoading}
+              size="sm"
+              variant="outline"
+            >
+              Send check-in to Telegram
+            </Button>
+          </div>
+          {(tickResult || demoResult) && (
+            <p className="text-xs text-muted-foreground mt-2">{tickResult ?? demoResult}</p>
+          )}
+        </section>
       </main>
     </div>
   );
