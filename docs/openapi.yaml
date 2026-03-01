@@ -1,0 +1,939 @@
+openapi: 3.0.3
+info:
+  title: Hackbitz API
+  description: |
+    Hackbitz is a multi-agent accountability system. Each goal gets its own AI companion
+    that reads logs, detects patterns across domains, coordinates with other companions,
+    and reaches out via Telegram when something needs attention.
+
+    ## Two API layers
+
+    | Layer | Base URL | Purpose |
+    |-------|----------|---------|
+    | **Frontend API** | `http://localhost:3000` | Next.js routes — CRUD for goals, logs, messages, states. Called by the web app. |
+    | **Modal Backend** | `https://<workspace>--lifeos-agents-*.modal.run` | Python functions — agent execution, coordinator, Telegram webhook. Called by cron + frontend proxy. |
+
+    ## Auth
+    Phase 1 uses a hardcoded mock user ID: `00000000-0000-0000-0000-000000000001`.
+
+    ## Agent templates
+    `fitness` · `sleep` · `money` · `social` · `short_lived` · `custom`
+
+    ## Agent action lifecycle
+    `monitor` → `nudge` → `call` → `escalate`
+  version: 1.0.0
+  contact:
+    name: Hackbitz Team
+  license:
+    name: MIT
+
+servers:
+  - url: http://localhost:3000
+    description: Next.js frontend (dev)
+  - url: https://jay2762--lifeos-agents-trigger-tick.modal.run
+    description: Modal backend — trigger_tick endpoint
+  - url: https://jay2762--lifeos-agents-trigger-tick-for-user.modal.run
+    description: Modal backend — trigger_tick_for_user endpoint
+  - url: https://jay2762--lifeos-agents-telegram-webhook.modal.run
+    description: Modal backend — Telegram webhook endpoint
+
+tags:
+  - name: Goals
+    description: Create and retrieve user goals. Goals are auto-classified by LLM into agent templates.
+  - name: Logs
+    description: User activity logs and journal entries. Auto-matched to the most relevant goal via LLM.
+  - name: Agent Messages
+    description: Messages from companion agents to the user — nudges, praise, escalations, win celebrations.
+  - name: Agent States
+    description: Internal state of each companion per goal — status, confidence, detected patterns, next action.
+  - name: Agent Orchestration
+    description: Trigger the agent network to analyze goals, run agents in parallel, and execute the coordinator.
+  - name: Telegram
+    description: Telegram Bot webhook — receives user messages, routes commands, classifies logs, triggers reactive agent ticks.
+
+paths:
+  # =====================================================================
+  # FRONTEND API (Next.js)
+  # =====================================================================
+
+  /api/goals:
+    get:
+      tags: [Goals]
+      summary: List all goals
+      description: Returns all goals for the mock user, ordered by creation date descending.
+      operationId: listGoals
+      responses:
+        "200":
+          description: Array of goals
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Goal"
+              example:
+                - id: "a3e40cba-e42d-4eaf-b99a-ef7ef5361f16"
+                  user_id: "00000000-0000-0000-0000-000000000001"
+                  name: "Gym 4 times a week"
+                  type: "habit"
+                  agent_template: "fitness"
+                  config:
+                    fitness:
+                      target: "gym workout"
+                      frequency_per_week: 4
+                  active: true
+                  end_at: null
+                  created_at: "2026-02-28T21:44:16.571354+00:00"
+        "500":
+          $ref: "#/components/responses/ServerError"
+
+    post:
+      tags: [Goals]
+      summary: Create a new goal
+      description: |
+        Accepts a natural-language description and optional deadline. The backend:
+        1. Sends the description to Groq `llama-3.1-8b-instant` for classification
+        2. Extracts `agent_template`, `goal_type`, `name`, and `config`
+        3. Validates against allowed DB values (falls back to `custom`/`habit` on invalid)
+        4. Inserts the goal row into Supabase
+
+        If LLM classification fails entirely, the goal is still created with defaults.
+      operationId: createGoal
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateGoalRequest"
+            examples:
+              fitness:
+                summary: Fitness goal
+                value:
+                  description: "Go to the gym 4 times a week"
+              sleep_with_bedtime:
+                summary: Sleep goal with specifics
+                value:
+                  description: "Sleep 8 hours every night, be in bed by 11pm"
+              deadline_goal:
+                summary: Goal with deadline
+                value:
+                  description: "Finish capstone project presentation"
+                  end_at: "2026-03-10"
+              budget:
+                summary: Budget goal
+                value:
+                  description: "Keep weekly spending under $150"
+      responses:
+        "201":
+          description: Goal created successfully
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Goal"
+        "400":
+          description: Missing required field
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+              example:
+                error: "description is required"
+        "500":
+          $ref: "#/components/responses/ServerError"
+
+  /api/logs:
+    get:
+      tags: [Logs]
+      summary: List recent activity logs
+      description: |
+        Returns the 50 most recent activity logs for the mock user, ordered newest first.
+        Each log includes joined goal data (`goals.name`) when a goal was matched.
+      operationId: listLogs
+      responses:
+        "200":
+          description: Array of log entries with joined goal names
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/LogEntry"
+              example:
+                - id: "71a94a24-3f02-4fc8-933f-b2944f912d0b"
+                  user_id: "00000000-0000-0000-0000-000000000001"
+                  goal_id: "a3e40cba-e42d-4eaf-b99a-ef7ef5361f16"
+                  content: "Skipped the gym again today. Told myself I would go after work but just came home."
+                  source: "manual_input"
+                  processed: false
+                  created_at: "2026-02-28T21:44:40.479631+00:00"
+                  goals:
+                    name: "Gym 4 times a week"
+        "500":
+          $ref: "#/components/responses/ServerError"
+
+    post:
+      tags: [Logs]
+      summary: Create an activity log
+      description: |
+        Accepts free-text content. The backend:
+        1. Fetches all active goals for the user
+        2. Sends the log + goal list to Groq for classification
+        3. Matches the log to the most relevant goal (or `null` if no match)
+        4. Inserts the log row into Supabase
+      operationId: createLog
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateLogRequest"
+            examples:
+              gym_skip:
+                summary: Skipped gym
+                value:
+                  content: "Skipped the gym again today. Told myself I would go after work but just came home."
+              good_sleep:
+                summary: Good sleep
+                value:
+                  content: "In bed by 10:45pm, slept 8.5 hours. Woke up naturally before my alarm."
+              spending:
+                summary: Overspending
+                value:
+                  content: "Ordered Uber Eats twice today. Spent about $45 on food delivery alone."
+              social:
+                summary: Social isolation
+                value:
+                  content: "Cancelled plans with friends again. Just didn't feel like going out."
+      responses:
+        "201":
+          description: Log entry created
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/LogEntry"
+        "400":
+          description: Missing content
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+              example:
+                error: "content is required"
+        "500":
+          $ref: "#/components/responses/ServerError"
+
+  /api/agent-messages:
+    get:
+      tags: [Agent Messages]
+      summary: List companion messages
+      description: |
+        Returns the 50 most recent messages from companion agents, ordered newest first.
+        Messages include nudges, escalation warnings, win celebrations, and coordinator summaries.
+        The `context` field may contain Exa AI content suggestions when the agent triggered a nudge/escalation.
+      operationId: listAgentMessages
+      responses:
+        "200":
+          description: Array of agent messages
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/AgentMessage"
+              examples:
+                nudge:
+                  summary: Fitness nudge
+                  value:
+                    - id: "f1a2b3c4-d5e6-7890-abcd-ef1234567890"
+                      user_id: "00000000-0000-0000-0000-000000000001"
+                      goal_id: "a3e40cba-e42d-4eaf-b99a-ef7ef5361f16"
+                      from_agent: "fitness:a3e40cba"
+                      to_agent: null
+                      message: "I noticed you've skipped the gym three days in a row. No judgment — want to try a shorter 20-min session tomorrow?"
+                      context:
+                        content_suggestions:
+                          - title: "10-minute home workout for zero motivation days"
+                            url: "https://example.com/article"
+                            snippet: "When you can't get yourself to the gym..."
+                            published_date: "2025-12-01"
+                      created_at: "2026-02-28T22:00:00.000000+00:00"
+                coordinator:
+                  summary: Coordinator message
+                  value:
+                    - id: "a1b2c3d4-e5f6-7890-1234-567890abcdef"
+                      user_id: "00000000-0000-0000-0000-000000000001"
+                      goal_id: null
+                      from_agent: "coordinator"
+                      to_agent: null
+                      message: "I've looked at everything — sleep is the priority right now. The gym and budget can wait."
+                      context: null
+                      created_at: "2026-02-28T22:01:00.000000+00:00"
+        "500":
+          $ref: "#/components/responses/ServerError"
+
+  /api/agent-states:
+    get:
+      tags: [Agent States]
+      summary: List agent states
+      description: |
+        Returns the current internal state of each companion (one per active goal).
+        Includes joined goal info (`goals.name`, `goals.agent_template`).
+        The `state` object contains the agent's last assessment: pattern detected, confidence, and recommended next action.
+      operationId: listAgentStates
+      responses:
+        "200":
+          description: Array of agent states with joined goal data
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/AgentState"
+              example:
+                - id: "d1e2f3a4-b5c6-7890-1234-567890abcdef"
+                  user_id: "00000000-0000-0000-0000-000000000001"
+                  goal_id: "a3e40cba-e42d-4eaf-b99a-ef7ef5361f16"
+                  state:
+                    last_checkin: "2026-02-28T22:00:00Z"
+                    pattern_detected: "Consistent gym skipping — 0 sessions this week"
+                    confidence: 0.85
+                    context_summary: "User is sleeping well but avoiding gym. Possible motivation issue."
+                    next_action: "nudge"
+                    next_action_time: "2026-02-28T22:00:00Z"
+                  updated_at: "2026-02-28T22:00:00.000000+00:00"
+                  goals:
+                    name: "Gym 4 times a week"
+                    agent_template: "fitness"
+        "500":
+          $ref: "#/components/responses/ServerError"
+
+  /api/trigger-tick:
+    post:
+      tags: [Agent Orchestration]
+      summary: Trigger agent check-in (frontend proxy)
+      description: |
+        Proxies a POST to the Modal backend `trigger_tick` endpoint. This:
+        1. Loads all active goals from Supabase
+        2. Auto-deactivates goals past their `end_at` deadline
+        3. Runs the appropriate agent template for each goal in parallel via Modal `.map()`
+        4. Runs the coordinator per user — pattern detection, conflict resolution, Telegram delivery
+        5. Writes agent states, messages, and interventions to the database
+
+        Also runs automatically every 15 minutes via Modal cron.
+      operationId: triggerTickProxy
+      responses:
+        "200":
+          description: Tick completed
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TickResult"
+              examples:
+                success:
+                  summary: Goals processed
+                  value:
+                    status: "ok"
+                    goals_processed: 4
+                    results:
+                      - goal_id: "a3e40cba-e42d-4eaf-b99a-ef7ef5361f16"
+                        status: "concerned"
+                        next_action: "nudge"
+                    coordinator:
+                      - user_id: "00000000-0000-0000-0000-000000000001"
+                        decision: "pattern_detected"
+                        patterns: 1
+                skipped:
+                  summary: No active goals
+                  value:
+                    status: "skipped"
+                    message: "No active goals found"
+        "500":
+          description: Modal function error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "502":
+          description: Cannot reach Modal backend
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+              example:
+                error: "Could not reach Modal endpoint: TypeError: fetch failed"
+        "503":
+          description: MODAL_TRIGGER_URL not configured
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+              example:
+                error: "MODAL_TRIGGER_URL not set. Deploy the Modal app and add the trigger_tick URL to your .env.local."
+
+  # =====================================================================
+  # MODAL BACKEND (Python on Modal)
+  # =====================================================================
+
+  /trigger_tick:
+    post:
+      tags: [Agent Orchestration]
+      summary: Run all agents + coordinator (Modal direct)
+      description: |
+        Direct Modal endpoint (bypasses the Next.js proxy). Runs the full agent pipeline:
+        1. Fetches all active goals across all users
+        2. Deactivates expired short-lived goals
+        3. Runs agent templates in parallel (`run_agent_for_goal.map()`)
+        4. Runs coordinator per user (`run_coordinator.map()`)
+
+        Each agent:
+        - Reads recent logs (last 7–14 days, capped at 10)
+        - Reads peer agent states (what other companions think)
+        - Queries Supermemory for cross-goal context (capped at 4 results)
+        - Calls Groq `llama-3.1-8b-instant` for assessment
+        - If nudge/escalate → calls Exa AI for content suggestions
+        - Writes state to `agent_states` + observations to Supermemory
+
+        The coordinator:
+        - Checks for 3+ tick concerning patterns
+        - Detects wins (agent flipped from concerned → monitoring)
+        - Deduplicates: skips if any intervention was sent in last 6 hours
+        - If multiple agents concerned → Groq `llama-3.3-70b` resolves (health > deadline > fitness > money)
+        - Sends one Telegram message with all agent sections + Exa content
+      operationId: triggerTickDirect
+      servers:
+        - url: https://jay2762--lifeos-agents-trigger-tick.modal.run
+          description: Modal direct
+      responses:
+        "200":
+          description: Pipeline completed
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TickResult"
+
+  /trigger_tick_for_user:
+    post:
+      tags: [Agent Orchestration]
+      summary: Run agents for a specific user (Modal)
+      description: |
+        Runs the agent pipeline for a single user only. Called internally after
+        a log is saved (from the Telegram webhook or frontend). Same pipeline as
+        `trigger_tick` but scoped to one user's goals.
+      operationId: triggerTickForUser
+      servers:
+        - url: https://jay2762--lifeos-agents-trigger-tick-for-user.modal.run
+          description: Modal direct
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/TriggerTickForUserRequest"
+            example:
+              user_id: "00000000-0000-0000-0000-000000000001"
+      responses:
+        "200":
+          description: User tick completed
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TickResult"
+              examples:
+                success:
+                  summary: Goals processed for user
+                  value:
+                    status: "ok"
+                    goals_processed: 3
+                    results:
+                      - goal_id: "a3e40cba-e42d-4eaf-b99a-ef7ef5361f16"
+                        status: "monitoring"
+                        next_action: "monitor"
+                    coordinator:
+                      - decision: "no_action"
+                        reason: "no agent states"
+                error:
+                  summary: Missing user_id
+                  value:
+                    status: "error"
+                    message: "user_id required"
+                skipped:
+                  summary: No active goals
+                  value:
+                    status: "skipped"
+                    message: "No active goals for user"
+
+  /telegram_webhook:
+    post:
+      tags: [Telegram]
+      summary: Telegram Bot webhook
+      description: |
+        Receives incoming messages from Telegram via webhook. Handles two flows:
+
+        **Bot commands (synchronous — instant response):**
+        - `/status` — Returns a quick health check across all goals (no LLM call)
+        - `/confused` — Uses Groq 70b to pick the ONE most important thing right now
+        - `/plan` — Uses Groq 70b to generate today's top 3 priorities
+        - `/help` — Returns available commands
+
+        **Text messages (async — log + trigger agents):**
+        1. Classifies the message to the most relevant active goal via Groq 8b
+        2. Saves it as a `user_log` entry in Supabase
+        3. Spawns `_tick_for_user` in the background (reactive mode)
+        4. The matching agent responds via Telegram on behalf of its companion persona
+
+        Webhook URL is registered with Telegram via `setWebhook`.
+      operationId: telegramWebhook
+      servers:
+        - url: https://jay2762--lifeos-agents-telegram-webhook.modal.run
+          description: Modal direct
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/TelegramUpdate"
+            examples:
+              text_message:
+                summary: User logs activity
+                value:
+                  message:
+                    message_id: 42
+                    from:
+                      id: 123456789
+                      first_name: "Jay"
+                    chat:
+                      id: 123456789
+                      type: "private"
+                    text: "Skipped gym again today, feeling lazy"
+                    date: 1709157600
+              status_command:
+                summary: /status command
+                value:
+                  message:
+                    message_id: 43
+                    from:
+                      id: 123456789
+                      first_name: "Jay"
+                    chat:
+                      id: 123456789
+                      type: "private"
+                    text: "/status"
+                    date: 1709157660
+      responses:
+        "200":
+          description: Webhook processed
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - $ref: "#/components/schemas/WebhookCommandResponse"
+                  - $ref: "#/components/schemas/WebhookLogResponse"
+                  - $ref: "#/components/schemas/WebhookIgnoredResponse"
+              examples:
+                command_handled:
+                  summary: Command processed
+                  value:
+                    status: "ok"
+                    command: "/status"
+                log_classified:
+                  summary: Text log saved + agents spawned
+                  value:
+                    status: "ok"
+                    goal_id: "a3e40cba-e42d-4eaf-b99a-ef7ef5361f16"
+                ignored:
+                  summary: Non-text or bot message
+                  value:
+                    status: "ignored"
+
+# =====================================================================
+# COMPONENTS
+# =====================================================================
+
+components:
+  schemas:
+    # -------------------------------------------------------------------
+    # Goal
+    # -------------------------------------------------------------------
+    Goal:
+      type: object
+      required:
+        [id, user_id, name, type, agent_template, config, active, created_at]
+      properties:
+        id:
+          type: string
+          format: uuid
+          description: Unique goal identifier
+        user_id:
+          type: string
+          format: uuid
+          description: Owner user ID
+        name:
+          type: string
+          maxLength: 40
+          description: Concise goal name (LLM-generated from description)
+        type:
+          type: string
+          enum: [habit, target, short_lived]
+          description: Goal classification type
+        agent_template:
+          type: string
+          enum: [fitness, sleep, money, social, short_lived, custom]
+          description: Which companion agent monitors this goal
+        config:
+          type: object
+          description: |
+            Template-specific config. Examples:
+            - fitness: `{ "frequency_per_week": 4, "target": "gym workout" }`
+            - sleep: `{ "hours_target": 8, "bedtime": "23:00" }`
+            - money: `{ "weekly_budget": 150 }`
+        active:
+          type: boolean
+          description: Whether the goal is currently active
+        end_at:
+          type: string
+          format: date-time
+          nullable: true
+          description: Optional deadline (used by short_lived goals, auto-deactivated after expiry)
+        created_at:
+          type: string
+          format: date-time
+
+    CreateGoalRequest:
+      type: object
+      required: [description]
+      properties:
+        description:
+          type: string
+          description: Natural-language goal description
+          example: "Go to the gym 3 times a week"
+        end_at:
+          type: string
+          format: date
+          description: Optional deadline (YYYY-MM-DD). Creates a short_lived goal.
+          example: "2026-03-10"
+
+    # -------------------------------------------------------------------
+    # Log
+    # -------------------------------------------------------------------
+    LogEntry:
+      type: object
+      required: [id, user_id, content, source, processed, created_at]
+      properties:
+        id:
+          type: string
+          format: uuid
+        user_id:
+          type: string
+          format: uuid
+        goal_id:
+          type: string
+          format: uuid
+          nullable: true
+          description: Auto-matched goal ID (LLM-classified, null if no match)
+        content:
+          type: string
+          description: Free-text activity log or journal entry
+        source:
+          type: string
+          enum: [manual_input, agent_checkin, voice_note]
+          description: How the log was created
+        processed:
+          type: boolean
+          description: Whether agents have analyzed this log
+        created_at:
+          type: string
+          format: date-time
+        goals:
+          type: object
+          nullable: true
+          description: Joined goal data (present in GET responses only)
+          properties:
+            name:
+              type: string
+
+    CreateLogRequest:
+      type: object
+      required: [content]
+      properties:
+        content:
+          type: string
+          description: Free-text activity log
+          example: "Slept terribly last night, maybe 5 hours"
+
+    # -------------------------------------------------------------------
+    # Agent Message
+    # -------------------------------------------------------------------
+    AgentMessage:
+      type: object
+      required: [id, user_id, from_agent, message, created_at]
+      properties:
+        id:
+          type: string
+          format: uuid
+        user_id:
+          type: string
+          format: uuid
+        goal_id:
+          type: string
+          format: uuid
+          nullable: true
+          description: Null for coordinator messages
+        from_agent:
+          type: string
+          description: "Agent ID. Format: `{template}:{goal_id_prefix}` or `coordinator`"
+          example: "fitness:a3e40cba"
+        to_agent:
+          type: string
+          nullable: true
+          description: Target agent (null = message to user)
+        message:
+          type: string
+          description: The companion's message
+        context:
+          type: object
+          nullable: true
+          description: Structured context — may include Exa content suggestions
+          properties:
+            content_suggestions:
+              type: array
+              items:
+                $ref: "#/components/schemas/ContentSuggestion"
+        created_at:
+          type: string
+          format: date-time
+
+    # -------------------------------------------------------------------
+    # Agent State
+    # -------------------------------------------------------------------
+    AgentState:
+      type: object
+      required: [id, user_id, goal_id, state, updated_at]
+      properties:
+        id:
+          type: string
+          format: uuid
+        user_id:
+          type: string
+          format: uuid
+        goal_id:
+          type: string
+          format: uuid
+        state:
+          type: object
+          description: Internal agent assessment
+          properties:
+            last_checkin:
+              type: string
+              format: date-time
+              description: When the agent last ran
+            pattern_detected:
+              type: string
+              nullable: true
+              description: Detected behavioral pattern (null when monitoring)
+            confidence:
+              type: number
+              format: float
+              minimum: 0.0
+              maximum: 1.0
+              description: Agent's confidence in its assessment
+            context_summary:
+              type: string
+              description: Cross-domain context summary (max 500 chars)
+            next_action:
+              type: string
+              enum: [monitor, nudge, call, escalate]
+              description: What the agent recommends doing next
+            next_action_time:
+              type: string
+              format: date-time
+              description: When the next action was determined
+        updated_at:
+          type: string
+          format: date-time
+        goals:
+          type: object
+          nullable: true
+          description: Joined goal data
+          properties:
+            name:
+              type: string
+            agent_template:
+              type: string
+
+    # -------------------------------------------------------------------
+    # Tick / Orchestration
+    # -------------------------------------------------------------------
+    TickResult:
+      type: object
+      properties:
+        status:
+          type: string
+          enum: [ok, skipped, error]
+        message:
+          type: string
+          description: Reason when status is "skipped" or "error"
+        goals_processed:
+          type: integer
+          description: Number of goals analyzed
+        results:
+          type: array
+          description: Per-goal agent results
+          items:
+            type: object
+            properties:
+              goal_id:
+                type: string
+                format: uuid
+              status:
+                type: string
+                enum: [monitoring, concerned, intervention_needed]
+              next_action:
+                type: string
+                enum: [monitor, nudge, call, escalate]
+              reasoning:
+                type: string
+              confidence:
+                type: number
+                format: float
+        coordinator:
+          type: array
+          description: Per-user coordinator decisions
+          items:
+            type: object
+            properties:
+              decision:
+                type: string
+                enum:
+                  [no_action, reactive_log, pattern_detected, win_message, win]
+              reason:
+                type: string
+              patterns:
+                type: integer
+              wins:
+                type: integer
+
+    TriggerTickForUserRequest:
+      type: object
+      required: [user_id]
+      properties:
+        user_id:
+          type: string
+          format: uuid
+          description: The user to run agents for
+
+    # -------------------------------------------------------------------
+    # Telegram
+    # -------------------------------------------------------------------
+    TelegramUpdate:
+      type: object
+      description: Telegram webhook update payload (subset of fields used)
+      properties:
+        message:
+          type: object
+          properties:
+            message_id:
+              type: integer
+            from:
+              type: object
+              properties:
+                id:
+                  type: integer
+                first_name:
+                  type: string
+            chat:
+              type: object
+              required: [id]
+              properties:
+                id:
+                  type: integer
+                  description: Telegram chat ID
+                type:
+                  type: string
+                  enum: [private, group, supergroup]
+            text:
+              type: string
+              description: Message text or command (e.g. "/status", "slept 6 hours")
+            date:
+              type: integer
+              description: Unix timestamp
+        edited_message:
+          type: object
+          description: Same structure as message (for edited messages)
+
+    WebhookCommandResponse:
+      type: object
+      properties:
+        status:
+          type: string
+          example: "ok"
+        command:
+          type: string
+          enum: ["/status", "/confused", "/plan", "/help"]
+
+    WebhookLogResponse:
+      type: object
+      properties:
+        status:
+          type: string
+          example: "ok"
+        goal_id:
+          type: string
+          format: uuid
+          nullable: true
+          description: Matched goal ID (null if unclassified)
+
+    WebhookIgnoredResponse:
+      type: object
+      properties:
+        status:
+          type: string
+          example: "ignored"
+        reason:
+          type: string
+          example: "unknown command"
+
+    # -------------------------------------------------------------------
+    # Shared
+    # -------------------------------------------------------------------
+    ContentSuggestion:
+      type: object
+      description: Exa AI content suggestion attached to agent messages
+      properties:
+        title:
+          type: string
+          example: "10-minute home workout for zero motivation days"
+        url:
+          type: string
+          format: uri
+          example: "https://example.com/article"
+        snippet:
+          type: string
+          description: 1-2 sentence highlight (max 300 chars)
+        published_date:
+          type: string
+          example: "2025-12-01"
+        flavor:
+          type: string
+          enum: [article, person, podcast, science, app, community, news]
+          description: Content type (rotated to vary recommendations)
+        flavor_label:
+          type: string
+          example: "📖 *Read*"
+
+    Error:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: string
+          description: Human-readable error message
+
+  responses:
+    ServerError:
+      description: Internal server error (usually a Supabase query failure)
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+          example:
+            error: 'relation "goals" does not exist'
