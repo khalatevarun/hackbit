@@ -31,6 +31,9 @@ def create_goal(
     agent_template: str,
     config: dict | None = None,
     end_at: str | None = None,
+    agent_name: str = "Goal",
+    personality: str = "warm",
+    priority: str = "normal",
 ) -> dict:
     row = {
         "user_id": user_id,
@@ -39,6 +42,9 @@ def create_goal(
         "agent_template": agent_template,
         "config": config or {},
         "active": True,
+        "agent_name": agent_name,
+        "personality": personality,
+        "priority": priority,
     }
     if end_at:
         row["end_at"] = end_at
@@ -54,6 +60,16 @@ def get_active_goals(user_id: str | None = None) -> list[dict]:
 
 def deactivate_goal(goal_id: str) -> None:
     get_client().table("goals").update({"active": False}).eq("id", goal_id).execute()
+
+
+def update_goal_meta(goal_id: str, fields: dict) -> dict:
+    """Update any combination of goal-level fields (personality, priority, config, agent_name)."""
+    return get_client().table("goals").update(fields).eq("id", goal_id).execute().data[0]
+
+
+def update_goal_config(goal_id: str, config: dict) -> dict:
+    """Replace the config jsonb for a goal."""
+    return get_client().table("goals").update({"config": config}).eq("id", goal_id).execute().data[0]
 
 
 # --------------- user_logs ---------------
@@ -143,7 +159,7 @@ def get_agent_states_for_user(user_id: str) -> list[dict]:
     return (
         get_client()
         .table("agent_states")
-        .select("*, goals(name, agent_template, config)")
+        .select("*, goals(name, agent_template, config, agent_name, personality, priority, end_at)")
         .eq("user_id", user_id)
         .execute()
         .data

@@ -1,13 +1,8 @@
 """
-LifeOS Modal App — Main entrypoint.
+LifeOS Modal App -- Main entrypoint.
 
 Everything runs on Modal: cron scheduling and parallel agent execution.
 LLM inference is handled by Groq API (free tier, near-instant responses).
-
-Each tick:
-1. Loads all active goals from Supabase
-2. For each goal, runs the appropriate agent template in parallel
-3. Runs pattern detection per user — sends Telegram only if threshold crossed
 """
 from __future__ import annotations
 
@@ -34,6 +29,7 @@ agent_image = (
         "groq",
         "exa-py",
         "requests",
+        "croniter",
     )
     .add_local_dir(
         Path(__file__).resolve().parent.parent / "shared",
@@ -58,17 +54,15 @@ secrets = [
 ]
 
 # ---------------------------------------------------------------------------
-# LLM call — Groq API (free tier, near-instant, no GPU needed)
+# LLM call -- Groq API
 # ---------------------------------------------------------------------------
 
-# Agents use 8b (500K tokens/day free) — fast and cheap
 GROQ_AGENT_MODEL = "llama-3.1-8b-instant"
-# Coordinator uses 70b (100K tokens/day) — only runs once per tick per user
 GROQ_COORDINATOR_MODEL = "llama-3.3-70b-versatile"
 
 
 def _llm_call(messages: list[dict], temperature: float = 0.3) -> str:
-    """LLM call for agents — uses fast 8b model."""
+    """LLM call for agents -- uses fast 8b model."""
     import os
     from groq import Groq
 
@@ -83,7 +77,7 @@ def _llm_call(messages: list[dict], temperature: float = 0.3) -> str:
 
 
 def _llm_call_coordinator(messages: list[dict], temperature: float = 0.3) -> str:
-    """LLM call for coordinator — uses 70b model for better reasoning."""
+    """LLM call for coordinator -- uses 70b model for better reasoning."""
     import os
     from groq import Groq
 
@@ -96,25 +90,6 @@ def _llm_call_coordinator(messages: list[dict], temperature: float = 0.3) -> str
     )
     return response.choices[0].message.content
 
-# ---------------------------------------------------------------------------
-# Agent registry + helpers
-# ---------------------------------------------------------------------------
-
-AGENT_REGISTRY = {
-    "fitness": "modal_app.agents.fitness.FitnessAgent",
-    "sleep": "modal_app.agents.sleep.SleepAgent",
-    "money": "modal_app.agents.money.MoneyAgent",
-    "social": "modal_app.agents.social.SocialAgent",
-    "short_lived": "modal_app.agents.short_lived.ShortLivedAgent",
-    "custom": "modal_app.agents.short_lived.ShortLivedAgent",
-}
-
-
-def _import_agent(dotted_path: str):
-    module_path, class_name = dotted_path.rsplit(".", 1)
-    import importlib
-    mod = importlib.import_module(module_path)
-    return getattr(mod, class_name)
 
 # ---------------------------------------------------------------------------
 # User data wipe
@@ -151,21 +126,28 @@ def _wipe_user_data(user_id: str) -> None:
 
 @app.function(image=agent_image, secrets=secrets, timeout=120)
 def run_agent_for_goal(goal: dict) -> dict:
-    """Run the appropriate agent template for a single goal."""
+    """Run the DynamicAgent for a single goal."""
     sys.path.insert(0, "/root")
 
     goal_id = goal["id"]
     user_id = goal["user_id"]
-    template = goal["agent_template"]
     config = goal.get("config", {})
 
-    try:
-        agent_cls = _import_agent(AGENT_REGISTRY.get(template, AGENT_REGISTRY["custom"]))
-        agent = agent_cls(llm_fn=_llm_call)
+    goal_meta = {
+        "agent_name": goal.get("agent_name", "Goal"),
+        "personality": goal.get("personality", "warm"),
+        "priority": goal.get("priority", "normal"),
+        "name": goal.get("name", ""),
+        "end_at": goal.get("end_at"),
+    }
 
-        print(f"[{template}:{goal_id[:8]}] Starting analysis ...")
-        result = agent.analyze(user_id, goal_id, config)
-        print(f"[{template}:{goal_id[:8]}] Done — status={result.status}, action={result.next_action}")
+    try:
+        from modal_app.agents.dynamic import DynamicAgent
+        agent = DynamicAgent(llm_fn=_llm_call)
+
+        print(f"[{goal_meta['agent_name']}:{goal_id[:8]}] Starting analysis ...")
+        result = agent.analyze(user_id, goal_id, config, goal_meta)
+        print(f"[{goal_meta['agent_name']}:{goal_id[:8]}] Done -- status={result.status}, action={result.next_action}")
 
         from shared import supabase_client as db
         db.upsert_agent_state(user_id, goal_id, result.to_state())
@@ -173,7 +155,7 @@ def run_agent_for_goal(goal: dict) -> dict:
         if result.message_to_user:
             db.create_agent_message(
                 user_id=user_id,
-                from_agent=f"{template}:{goal_id}",
+                from_agent=f"{goal_meta['agent_name']}:{goal_id}",
                 message=result.message_to_user,
                 goal_id=goal_id,
             )
@@ -184,7 +166,7 @@ def run_agent_for_goal(goal: dict) -> dict:
             "next_action": result.next_action,
         }
     except Exception as e:
-        print(f"[{template}:{goal_id[:8]}] ERROR: {e}")
+        print(f"[{goal_meta['agent_name']}:{goal_id[:8]}] ERROR: {e}")
         traceback.print_exc()
         return {
             "goal_id": goal_id,
@@ -244,14 +226,100 @@ def tick():
         print("No active goals found. Skipping tick.")
         return
 
-    # Run agents (silent — they update states/state_history, no Telegram)
     results = list(run_agent_for_goal.map(active_goals))
     print(f"Processed {len(results)} goals: {results}")
 
-    # Pattern-check per user (fires Telegram only if threshold crossed)
     user_ids = list({g["user_id"] for g in active_goals})
     coord_results = list(run_coordinator.map(user_ids))
     print(f"Coordinator results: {coord_results}")
+
+
+@app.function(
+    image=agent_image,
+    secrets=secrets,
+    timeout=300,
+    schedule=modal.Cron("*/5 * * * *"),
+)
+def scheduled_nudge_tick():
+    """Every 5 minutes: check per-goal nudge/logcheck schedules and nightly summary."""
+    sys.path.insert(0, "/root")
+    from croniter import croniter
+    from shared import supabase_client as db
+    from shared import telegram_client as tg
+    from modal_app.coordinator import generate_nudge_message, generate_logcheck_message, handle_nightly_summary
+
+    now = datetime.now(timezone.utc)
+    goals = db.get_active_goals()
+    if not goals:
+        return
+
+    # Group goals by user
+    by_user: dict[str, list[dict]] = {}
+    for g in goals:
+        by_user.setdefault(g["user_id"], []).append(g)
+
+    for user_id, user_goals in by_user.items():
+        chat_id = db.get_telegram_chat_id(user_id)
+        if not chat_id:
+            continue
+
+        for goal in user_goals:
+            config = goal.get("config") or {}
+
+            # Nudge schedule
+            nudge_cron = config.get("nudge_schedule")
+            if nudge_cron:
+                try:
+                    cron = croniter(nudge_cron, now)
+                    prev_fire = cron.get_prev(datetime)
+                    if prev_fire.tzinfo is None:
+                        prev_fire = prev_fire.replace(tzinfo=timezone.utc)
+                    seconds_ago = (now - prev_fire).total_seconds()
+                    if 0 <= seconds_ago < 300:
+                        msg = generate_nudge_message(goal, user_id, _llm_call_coordinator)
+                        tg.send_message(chat_id, msg)
+                except Exception as e:
+                    print(f"[nudge_tick] Nudge error for goal {goal['id'][:8]}: {e}")
+
+            # Log-check schedule
+            logcheck_cron = config.get("logcheck_schedule")
+            if logcheck_cron:
+                try:
+                    cron = croniter(logcheck_cron, now)
+                    prev_fire = cron.get_prev(datetime)
+                    if prev_fire.tzinfo is None:
+                        prev_fire = prev_fire.replace(tzinfo=timezone.utc)
+                    seconds_ago = (now - prev_fire).total_seconds()
+                    if 0 <= seconds_ago < 300:
+                        today_logs = db.get_recent_logs(user_id, goal_id=goal["id"], days=1)
+                        if not today_logs:
+                            msg = generate_logcheck_message(goal)
+                            tg.send_message(chat_id, msg)
+                except Exception as e:
+                    print(f"[nudge_tick] Logcheck error for goal {goal['id'][:8]}: {e}")
+
+        # Nightly summary check: derive time from sleep goal's target_bedtime or default 22:00
+        summary_hour = 22
+        for g in user_goals:
+            cfg = g.get("config") or {}
+            bedtime = cfg.get("target_bedtime")
+            if bedtime:
+                try:
+                    summary_hour = int(bedtime.split(":")[0])
+                except (ValueError, IndexError):
+                    pass
+                break
+
+        if now.hour == summary_hour and now.minute < 5:
+            recent = db.get_recent_interventions(user_id, hours=6)
+            nightly_already = any(
+                i.get("intervention_type") == "nightly_summary" for i in recent
+            )
+            if not nightly_already:
+                try:
+                    handle_nightly_summary(user_id, _llm_call_coordinator)
+                except Exception as e:
+                    print(f"[nudge_tick] Nightly summary error for user {user_id[:8]}: {e}")
 
 
 @app.function(image=agent_image, secrets=secrets, timeout=300)
@@ -327,11 +395,7 @@ def trigger_tick_for_user(body: dict):
 @app.function(image=agent_image, secrets=secrets, timeout=60)
 @modal.fastapi_endpoint(method="POST", docs=True)
 def telegram_webhook(body: dict):
-    """Receive Telegram webhook updates.
-
-    Commands → synchronous response (reads DB, calls LLM, sends Telegram).
-    Text logs → classify, save, spawn background analysis.
-    """
+    """Receive Telegram webhook updates."""
     sys.path.insert(0, "/root")
     import os
     from groq import Groq
@@ -344,7 +408,7 @@ def telegram_webhook(body: dict):
     )
     from modal_app.coordinator import (
         HELP_TEXT,
-        handle_status_command,
+        handle_list_command,
         handle_confused_command,
         handle_plan_command,
         handle_addgoal_command,
@@ -364,31 +428,36 @@ def telegram_webhook(body: dict):
         answer_callback_query(update["callback_query_id"])
         data = update["data"]
 
-        # classify:confirm:<log_id>:<goal_id>
+        # classify:confirm:<short_log_id>:<short_goal_id>
         if data.startswith("cls:c:"):
             parts = data.split(":", 3)
             if len(parts) == 4:
-                log_id, goal_id = parts[2], parts[3]
-                db.update_log_goal(log_id, goal_id)
-                goal_info = next(
-                    (g for g in db.get_active_goals(user_id=user_id) if g["id"] == goal_id),
-                    None,
-                )
-                goal_name = goal_info["name"] if goal_info else "that goal"
-                send_message(chat_id, f"⚡ *hackbitz*\n\nGot it — logged under _{goal_name}_.")
-                _tick_for_user.spawn(user_id, "reactive_log", goal_id)
+                short_log, short_goal = parts[2], parts[3]
+                # Resolve short UUIDs by prefix match
+                recent_logs = db.get_recent_logs(user_id, days=1, limit=20)
+                log_id = next((l["id"] for l in recent_logs if l["id"].startswith(short_log)), None)
+                active_goals = db.get_active_goals(user_id=user_id)
+                goal_id = next((g["id"] for g in active_goals if g["id"].startswith(short_goal)), None)
+                if log_id and goal_id:
+                    db.update_log_goal(log_id, goal_id)
+                    goal_info = next((g for g in active_goals if g["id"] == goal_id), None)
+                    goal_name = goal_info["name"] if goal_info else "that goal"
+                    send_message(chat_id, f"*hackbitz*\n\nGot it -- logged under _{goal_name}_.")
+                    _tick_for_user.spawn(user_id, "reactive_log", goal_id)
+                else:
+                    send_message(chat_id, "*hackbitz*\n\nGot it, noted.")
             return {"status": "ok", "callback": "confirm"}
 
         # classify:skip:<log_id>
         if data.startswith("cls:s:"):
-            send_message(chat_id, "⚡ *hackbitz*\n\nSaved without linking to a goal.")
+            send_message(chat_id, "*hackbitz*\n\nSaved without linking to a goal.")
             return {"status": "ok", "callback": "skip"}
 
         # classify:new:<log_id>
         if data.startswith("cls:n:"):
             send_message(
                 chat_id,
-                "⚡ *hackbitz*\n\nSend me `/addgoal <description>` to create a new goal for this.",
+                "*hackbitz*\n\nSend me `/addgoal <description>` to create a new goal for this.",
             )
             return {"status": "ok", "callback": "new"}
 
@@ -397,14 +466,140 @@ def telegram_webhook(body: dict):
             _wipe_user_data(user_id)
             send_message(
                 chat_id,
-                "⚡ *hackbitz*\n\nDone — everything has been wiped. You're starting fresh.\n\n"
+                "*hackbitz*\n\nDone -- everything has been wiped. You're starting fresh.\n\n"
                 "Use /addgoal to set up your first goal.",
             )
             return {"status": "ok", "callback": "reset_confirm"}
 
         if data == "reset:cancel":
-            send_message(chat_id, "⚡ *hackbitz*\n\nCancelled. Your data is safe.")
+            send_message(chat_id, "*hackbitz*\n\nCancelled. Your data is safe.")
             return {"status": "ok", "callback": "reset_cancel"}
+
+        # addgoal:exp:<goal_id>:<new|failed> -- experience questionnaire
+        if data.startswith("addgoal:exp:"):
+            parts = data.split(":")
+            if len(parts) == 4:
+                goal_id = parts[2]
+                experience = parts[3]
+                if experience == "failed":
+                    db.update_goal_meta(goal_id, {"personality": "strict", "priority": "high"})
+                    send_message_with_buttons(
+                        chat_id,
+                        "*hackbitz*\n\nUnderstood -- I'll be direct with you on this one.\nWhen should I nudge you about this?",
+                        [
+                            [
+                                {"text": "Every morning 9am", "callback_data": f"addgoal:nudge:{goal_id}:9am"},
+                                {"text": "Every evening 7pm", "callback_data": f"addgoal:nudge:{goal_id}:7pm"},
+                            ],
+                            [{"text": "Custom", "callback_data": f"addgoal:nudge:{goal_id}:custom"}],
+                        ],
+                    )
+                else:
+                    db.update_goal_meta(goal_id, {"personality": "warm", "priority": "normal"})
+                    send_message_with_buttons(
+                        chat_id,
+                        "*hackbitz*\n\nGot it -- I'll keep things encouraging.\nWhen should I nudge you about this?",
+                        [
+                            [
+                                {"text": "Every morning 9am", "callback_data": f"addgoal:nudge:{goal_id}:9am"},
+                                {"text": "Every evening 7pm", "callback_data": f"addgoal:nudge:{goal_id}:7pm"},
+                            ],
+                            [{"text": "Custom", "callback_data": f"addgoal:nudge:{goal_id}:custom"}],
+                        ],
+                    )
+            return {"status": "ok", "callback": "addgoal_exp"}
+
+        # addgoal:nudge:<goal_id>:<time>
+        if data.startswith("addgoal:nudge:"):
+            parts = data.split(":")
+            if len(parts) == 4:
+                goal_id = parts[2]
+                time_choice = parts[3]
+                cron_map = {"9am": "0 9 * * *", "7pm": "0 19 * * *"}
+                if time_choice == "custom":
+                    send_message(chat_id, "*hackbitz*\n\nTell me when you want the nudge (e.g. 'daily 8am', 'every morning 6am').")
+                    return {"status": "ok", "callback": "addgoal_nudge_custom"}
+                cron_expr = cron_map.get(time_choice, "0 9 * * *")
+                goals = db.get_active_goals(user_id=user_id)
+                goal = next((g for g in goals if g["id"] == goal_id), None)
+                if goal:
+                    config = goal.get("config") or {}
+                    config["nudge_schedule"] = cron_expr
+                    db.update_goal_config(goal_id, config)
+                send_message_with_buttons(
+                    chat_id,
+                    "*hackbitz*\n\nAnd when should I check if you logged progress?",
+                    [
+                        [
+                            {"text": "Daily 10pm", "callback_data": f"addgoal:logcheck:{goal_id}:10pm"},
+                            {"text": "Daily 8pm", "callback_data": f"addgoal:logcheck:{goal_id}:8pm"},
+                        ],
+                        [{"text": "Custom", "callback_data": f"addgoal:logcheck:{goal_id}:custom"}],
+                    ],
+                )
+            return {"status": "ok", "callback": "addgoal_nudge"}
+
+        # addgoal:logcheck:<goal_id>:<time>
+        if data.startswith("addgoal:logcheck:"):
+            parts = data.split(":")
+            if len(parts) == 4:
+                goal_id = parts[2]
+                time_choice = parts[3]
+                cron_map = {"10pm": "0 22 * * *", "8pm": "0 20 * * *"}
+                if time_choice == "custom":
+                    send_message(chat_id, "*hackbitz*\n\nTell me when you want the log check (e.g. 'daily 10pm', 'every evening 9pm').")
+                    return {"status": "ok", "callback": "addgoal_logcheck_custom"}
+                cron_expr = cron_map.get(time_choice, "0 22 * * *")
+                goals = db.get_active_goals(user_id=user_id)
+                goal = next((g for g in goals if g["id"] == goal_id), None)
+                agent_name = "Goal"
+                nudge_label = ""
+                if goal:
+                    config = goal.get("config") or {}
+                    config["logcheck_schedule"] = cron_expr
+                    db.update_goal_config(goal_id, config)
+                    agent_name = goal.get("agent_name", "Goal")
+                    nudge_cron = config.get("nudge_schedule", "")
+                    if "9" in nudge_cron:
+                        nudge_label = "9am"
+                    elif "19" in nudge_cron:
+                        nudge_label = "7pm"
+                    else:
+                        nudge_label = "your chosen time"
+
+                personality = goal.get("personality", "warm") if goal else "warm"
+                closing = "No going easy on you." if personality == "strict" else "I've got your back."
+                send_message(
+                    chat_id,
+                    f"*hackbitz*\n\nAll set! {agent_name} will remind you at {nudge_label} and check in at {time_choice}.\n{closing}",
+                )
+            return {"status": "ok", "callback": "addgoal_logcheck"}
+
+        # adjust:yes:<goal_id> / adjust:no:<goal_id>
+        if data.startswith("adjust:yes:"):
+            goal_id = data.split(":", 2)[2]
+            agent_states = db.get_agent_states_for_user(user_id)
+            matched = next((s for s in agent_states if s["goal_id"] == goal_id), None)
+            if matched:
+                state = matched.get("state", {})
+                adjustment = state.get("goal_adjustment", {})
+                new_config = adjustment.get("new_config")
+                if new_config:
+                    goals = db.get_active_goals(user_id=user_id)
+                    goal = next((g for g in goals if g["id"] == goal_id), None)
+                    if goal:
+                        config = goal.get("config") or {}
+                        config.update(new_config)
+                        db.update_goal_config(goal_id, config)
+                        agent_name = goal.get("agent_name", "Goal")
+                        send_message(chat_id, f"*{agent_name}*\n\nDone -- goal adjusted. Let's see how this goes.")
+                        return {"status": "ok", "callback": "adjust_yes"}
+            send_message(chat_id, "*hackbitz*\n\nAdjusted.")
+            return {"status": "ok", "callback": "adjust_yes"}
+
+        if data.startswith("adjust:no:"):
+            send_message(chat_id, "*hackbitz*\n\nGot it -- keeping the goal as is.")
+            return {"status": "ok", "callback": "adjust_no"}
 
         return {"status": "ignored", "reason": "unknown callback"}
 
@@ -414,14 +609,14 @@ def telegram_webhook(body: dict):
     if is_new:
         send_message(
             chat_id,
-            "⚡ *hackbitz*\n\nHi, I'm hackbitz. Use /addgoal to add a goal, /help for commands.",
+            "*hackbitz*\n\nHi, I'm hackbitz. Use /addgoal to add a goal, /help for commands.",
         )
 
     # --- Command routing ---
-    if text == "/status":
-        status_text = handle_status_command(user_id)
-        send_message(chat_id, status_text)
-        return {"status": "ok", "command": "/status"}
+    if text == "/list":
+        response_text = handle_list_command(user_id)
+        send_message(chat_id, response_text)
+        return {"status": "ok", "command": "/list"}
 
     if text == "/confused":
         response_text = handle_confused_command(user_id, _llm_call_coordinator)
@@ -438,7 +633,7 @@ def telegram_webhook(body: dict):
         return {"status": "ok", "command": "/help"}
 
     if text == "/checkin":
-        send_message(chat_id, "⚡ *hackbitz*\n\nOn it — checking in on everything right now. Give me a minute.")
+        send_message(chat_id, "*hackbitz*\n\nOn it -- checking in on everything right now. Give me a minute.")
         _tick_for_user.spawn(user_id, "checkin")
         return {"status": "ok", "command": "/checkin"}
 
@@ -453,20 +648,56 @@ def telegram_webhook(body: dict):
             number = int(arg)
             response_text = handle_deletegoal_number_command(user_id, number)
         except ValueError:
-            response_text = "⚡ *hackbitz*\n\nUse `/deletegoal` to see your goals, then `/deletegoal <number>` to remove one."
+            response_text = "*hackbitz*\n\nUse `/deletegoal` to see your goals, then `/deletegoal <number>` to remove one."
         send_message(chat_id, response_text)
         return {"status": "ok", "command": "/deletegoal"}
 
     if text.startswith("/addgoal"):
         description = text[len("/addgoal"):].strip()
-        response_text = handle_addgoal_command(description, user_id, _llm_call_coordinator)
-        send_message(chat_id, response_text)
+        goal, error_text = handle_addgoal_command(description, user_id, _llm_call_coordinator)
+        if error_text:
+            send_message(chat_id, error_text)
+            return {"status": "ok", "command": "/addgoal"}
+
+        agent_name = goal.get("agent_name", "Goal")
+        goal_name = goal.get("name", description[:50])
+        goal_id = goal["id"]
+        has_deadline = goal.get("priority") == "critical"
+
+        confirm_msg = (
+            f"*hackbitz*\n\nGot it -- I've added \"{goal_name}\".\n"
+            f"Everything related to this will be tracked by *{agent_name}*."
+        )
+
+        if has_deadline:
+            # Deadline goals skip experience question, go straight to nudge schedule
+            send_message_with_buttons(
+                chat_id,
+                confirm_msg + "\nWhen should I nudge you about this?",
+                [
+                    [
+                        {"text": "Every morning 9am", "callback_data": f"addgoal:nudge:{goal_id}:9am"},
+                        {"text": "Every evening 7pm", "callback_data": f"addgoal:nudge:{goal_id}:7pm"},
+                    ],
+                    [{"text": "Custom", "callback_data": f"addgoal:nudge:{goal_id}:custom"}],
+                ],
+            )
+        else:
+            # Non-deadline goals: ask experience question first
+            send_message_with_buttons(
+                chat_id,
+                confirm_msg + "\nHave you tried following this goal before?",
+                [
+                    [{"text": "New to this -- first time", "callback_data": f"addgoal:exp:{goal_id}:new"}],
+                    [{"text": "Tried before, need to get serious", "callback_data": f"addgoal:exp:{goal_id}:failed"}],
+                ],
+            )
         return {"status": "ok", "command": "/addgoal"}
 
     if text == "/reset":
         send_message_with_buttons(
             chat_id,
-            "⚡ *hackbitz*\n\nThis will delete all your goals, logs, and history. Are you sure?",
+            "*hackbitz*\n\nThis will delete all your goals, logs, and history. Are you sure?",
             [[
                 {"text": "Yes, wipe everything", "callback_data": "reset:confirm"},
                 {"text": "Cancel", "callback_data": "reset:cancel"},
@@ -477,14 +708,14 @@ def telegram_webhook(body: dict):
     if text.startswith("/"):
         return {"status": "ignored", "reason": "unknown command"}
 
-    # --- Text log: classify → save → spawn reactive analysis ---
+    # --- Text log: classify -> save -> spawn reactive analysis ---
     classified_goal_id = None
     confidence = 0.0
     goals = db.get_active_goals(user_id=user_id)
     try:
         if goals:
             goal_list = "\n".join(
-                f"- id: {g['id']} | name: \"{g['name']}\" | type: {g['agent_template']}"
+                f"- id: {g['id']} | name: \"{g['name']}\" | agent: {g.get('agent_name', 'Goal')}"
                 for g in goals
             )
             groq_client = Groq(api_key=os.environ["GROQ_API_KEY"])
@@ -502,7 +733,7 @@ def telegram_webhook(body: dict):
                             "Rules:\n"
                             "- Always pick the single best match if one exists, even if uncertain.\n"
                             "- confidence >= 0.7 means you're sure it fits.\n"
-                            "- confidence < 0.7 means it's a guess — the user will be asked to confirm.\n"
+                            "- confidence < 0.7 means it's a guess.\n"
                             "- If truly nothing fits at all, return goal_id: null with confidence: 0."
                         ),
                     },
@@ -526,7 +757,6 @@ def telegram_webhook(body: dict):
     except Exception as e:
         print(f"[telegram_webhook] Classification error: {e}")
 
-    # High confidence or no goals → save and proceed
     if confidence >= 0.7 or not goals:
         log = db.create_log(
             user_id=user_id,
@@ -538,7 +768,6 @@ def telegram_webhook(body: dict):
         _tick_for_user.spawn(user_id, "reactive_log", classified_goal_id, text)
         return {"status": "ok", "goal_id": classified_goal_id}
 
-    # Low confidence → save without goal, ask user to confirm
     log = db.create_log(
         user_id=user_id,
         content=text,
@@ -550,11 +779,12 @@ def telegram_webhook(body: dict):
     if classified_goal_id:
         goal_info = next((g for g in goals if g["id"] == classified_goal_id), None)
         goal_name = goal_info["name"] if goal_info else "Unknown"
-        goal_emoji = {"sleep": "🌙", "fitness": "🏃", "money": "💰", "social": "🤝",
-                      "short_lived": "📚", "custom": "📚"}.get(
-            goal_info.get("agent_template", ""), "📌") if goal_info else "📌"
+        agent_name = goal_info.get("agent_name", "Goal") if goal_info else "Goal"
+        # Shorten UUIDs to first 8 chars to stay within Telegram's 64-byte callback_data limit
+        short_log = log_id[:8]
+        short_goal = classified_goal_id[:8]
         buttons = [
-            [{"text": f"Yes, log under {goal_emoji} {goal_name}", "callback_data": f"cls:c:{log_id}:{classified_goal_id}"}],
+            [{"text": f"Yes, log under {agent_name} -- {goal_name}", "callback_data": f"cls:c:{short_log}:{short_goal}"}],
             [
                 {"text": "Create new goal", "callback_data": f"cls:n:{log_id}"},
                 {"text": "Just save it", "callback_data": f"cls:s:{log_id}"},
@@ -562,7 +792,7 @@ def telegram_webhook(body: dict):
         ]
         send_message_with_buttons(
             chat_id,
-            f"⚡ *hackbitz*\n\nThis sounds like it could be part of _{goal_name}_. Should I log it there?",
+            f"*hackbitz*\n\nThis sounds like it could be part of _{goal_name}_. Should I log it there?",
             buttons,
         )
     else:
@@ -572,7 +802,7 @@ def telegram_webhook(body: dict):
         ]
         send_message_with_buttons(
             chat_id,
-            "⚡ *hackbitz*\n\nI'm not sure which goal this belongs to. Want to create a new goal for it, or just save it as a general note?",
+            "*hackbitz*\n\nI'm not sure which goal this belongs to. Want to create a new goal for it, or just save it as a general note?",
             buttons,
         )
     return {"status": "ok", "goal_id": None, "pending_confirmation": True}
@@ -585,7 +815,7 @@ def _tick_for_user(
     source_goal_id: str | None = None,
     trigger_log: str | None = None,
 ) -> None:
-    """Internal: run agents + coordinator for one user. Called via spawn (fire and forget)."""
+    """Internal: run agents + coordinator for one user. Called via spawn."""
     sys.path.insert(0, "/root")
     from shared import supabase_client as db
     from modal_app.coordinator import coordinate_for_user
@@ -606,8 +836,6 @@ def _tick_for_user(
         return
 
     if mode == "reactive_log":
-        # For the matched goal, ensure an agent_state exists before the coordinator
-        # reads it. New goals won't have one yet (agents haven't run).
         if source_goal_id:
             matched = [g for g in active_goals if g["id"] == source_goal_id]
             if matched:
@@ -617,7 +845,6 @@ def _tick_for_user(
                 if not has_state:
                     run_agent_for_goal.remote(matched[0])
 
-        # Coordinator responds using latest states, then remaining agents update.
         coordinate_for_user(
             user_id,
             llm_fn=_llm_call_coordinator,
@@ -627,7 +854,6 @@ def _tick_for_user(
         )
         list(run_agent_for_goal.map(active_goals))
     else:
-        # For cron ticks, checkin, etc. — run agents first, then coordinate.
         list(run_agent_for_goal.map(active_goals))
         coordinate_for_user(
             user_id,

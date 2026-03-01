@@ -20,6 +20,7 @@ class AgentResult:
         context_summary: str = "",
         message_to_user: str | None = None,
         content_suggestions: list[dict] | None = None,
+        goal_adjustment: dict | None = None,
     ):
         self.status = status
         self.next_action = next_action
@@ -28,9 +29,10 @@ class AgentResult:
         self.context_summary = context_summary
         self.message_to_user = message_to_user
         self.content_suggestions = content_suggestions or []
+        self.goal_adjustment = goal_adjustment
 
     def to_state(self) -> dict:
-        return {
+        state = {
             "last_checkin": datetime.now(timezone.utc).isoformat(),
             "pattern_detected": self.status if self.status != "monitoring" else None,
             "confidence": self.confidence,
@@ -38,6 +40,9 @@ class AgentResult:
             "next_action": self.next_action,
             "next_action_time": datetime.now(timezone.utc).isoformat(),
         }
+        if self.goal_adjustment:
+            state["goal_adjustment"] = self.goal_adjustment
+        return state
 
 
 def _extract_json(text: str) -> dict:
@@ -47,7 +52,13 @@ def _extract_json(text: str) -> dict:
     if fence:
         text = text[fence.end():]
         text = re.sub(r"\n?```\s*$", "", text)
-    return json.loads(text)
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        match = re.search(r"\{[\s\S]*\}", text)
+        if match:
+            return json.loads(match.group(0))
+        raise
 
 
 class BaseAgent(ABC):
@@ -57,7 +68,7 @@ class BaseAgent(ABC):
         self._llm_fn = llm_fn
 
     @abstractmethod
-    def analyze(self, user_id: str, goal_id: str, config: dict) -> AgentResult:
+    def analyze(self, user_id: str, goal_id: str, config: dict, goal_meta: dict) -> AgentResult:
         ...
 
     def get_logs(self, user_id: str, goal_id: str | None, days: int = 7) -> list[dict]:
@@ -82,7 +93,7 @@ class BaseAgent(ABC):
         )
 
     def get_peer_states(self, user_id: str, exclude_goal_id: str) -> str:
-        """Return a formatted summary of what other agents are currently thinking."""
+        """Return a formatted summary of what other agents are currently doing."""
         states = db.get_agent_states_for_user(user_id)
         lines = []
         for s in states:
@@ -90,26 +101,24 @@ class BaseAgent(ABC):
                 continue
             state = s.get("state", {})
             goal_info = s.get("goals") or {}
-            template = goal_info.get("agent_template", "unknown")
+            agent_name = goal_info.get("agent_name", goal_info.get("name", "unknown"))
             goal_name = goal_info.get("name", "unknown goal")
+            priority = goal_info.get("priority", "normal")
             next_action = state.get("next_action", "monitor")
-            pattern = state.get("pattern_detected", "")
             confidence = state.get("confidence", 0.0)
             context = state.get("context_summary", "")
-            summary = f"- {template.capitalize()} companion ({goal_name}): {next_action}"
+            summary = f"- {agent_name} ({goal_name}): {next_action}, priority={priority}"
             if confidence:
                 summary += f" (confidence {confidence:.2f})"
-            if pattern:
-                summary += f" — \"{pattern}\""
             if context:
                 summary += f". Context: {context[:150]}"
             lines.append(summary)
         if not lines:
-            return "No other companions have recent states."
+            return "No other goals have recent states."
         return "\n".join(lines)
 
     def llm_assess(self, system_prompt: str, user_prompt: str) -> dict:
-        """Run an LLM assessment via the Modal GPU service and parse JSON."""
+        """Run an LLM assessment and parse JSON."""
         messages = [
             {
                 "role": "system",

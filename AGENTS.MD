@@ -1,104 +1,105 @@
-# LifeOS — Spec and Current State
+# LifeOS -- Spec and Current State
 
 ## 0. Stack
 
-**Frontend:** Next.js 15, React 19, Tailwind v4, shadcn/ui. No auth — single mock user for web app.
+**Frontend:** Next.js 15, React 19, Tailwind v4, shadcn/ui. No auth -- single mock user for web app.
 
-**Backend:** Python 3.12, uv for deps, Modal for scheduling + parallel execution, Supabase for DB, Supermemory for shared semantic memory. **Telegram:** Multi-user via `telegram_user_mapping` (chat_id → user_id); each bot chat gets isolated goals, logs, and agent state; coordinator looks up chat_id per user when sending.
+**Backend:** Python 3.12, uv for deps, Modal for scheduling + parallel execution, Supabase for DB, Supermemory for shared semantic memory. **Telegram:** Multi-user via `telegram_user_mapping` (chat_id -> user_id); each bot chat gets isolated goals, logs, and agent state; coordinator looks up chat_id per user when sending.
 
 **LLM:**
-- **Agents (backend):** Groq API — `llama-3.1-8b-instant`, free tier (500K tokens/day). Fast, low cost.
-- **Coordinator (backend):** Groq API — `llama-3.3-70b-versatile`, free tier (100K tokens/day). Better reasoning for conflict resolution + message generation.
-- **Goal classification + log routing (frontend + telegram webhook):** Groq API — `llama-3.1-8b-instant`, called server-side.
+- **Agents (backend):** Groq API -- `llama-3.1-8b-instant`, free tier (500K tokens/day). Fast, low cost.
+- **Coordinator (backend):** Groq API -- `llama-3.3-70b-versatile`, free tier (100K tokens/day). Better reasoning for conflict resolution + message generation.
+- **Goal classification + log routing (frontend + telegram webhook):** Groq API -- `llama-3.1-8b-instant`, called server-side.
 - No GPU, no vLLM. Modal runs CPU-only functions; Groq handles all inference.
 
-**Content suggestions:** Exa AI (`https://api.exa.ai/search`) — coordinator fetches relevant content when an agent's state warrants it. 10 content flavors; LLM picks the best one per situation.
+**Content suggestions:** Exa AI (`https://api.exa.ai/search`) -- coordinator fetches relevant content when an agent's state warrants it. 10 content flavors; topics are LLM-generated per goal (stored in `config.domain_topics`).
 
-**Delivery:** Telegram Bot API — coordinator sends messages to user; user replies go back as logs.
+**Delivery:** Telegram Bot API -- coordinator sends messages to user; user replies go back as logs.
 
 **Why Modal + Supermemory:**
-- **Modal** = where and when agents run: cron schedules, parallel `.map()` over goals, web endpoints, secrets management.
+- **Modal** = where and when agents run: cron schedules (30-min heartbeat + 5-min nudge tick), parallel `.map()` over goals, web endpoints, secrets management.
 - **Supermemory** = what agents remember: semantic search across observations, cross-goal context, time/tag-scoped queries.
 
 ---
 
 ## 1. Concept
 
-One agent per goal. When a user writes "I want to sleep 8 hours a night", the system:
-1. Classifies it via LLM into an agent template (sleep, fitness, money, social, short_lived, custom).
-2. Creates a goal row in Supabase with the right config.
-3. An agent runs on every tick for that goal, reads the user's logs, queries Supermemory for cross-goal context, reads peer agent states, and decides whether to `monitor` / `nudge` / `call` / `escalate`.
+One agent per goal. All goals use a single `DynamicAgent` class -- no pre-built templates. When a user writes "I want to sleep 8 hours a night", the system:
+1. Classifies it via LLM, extracting `agent_name`, `agent_template`, `config` (including `domain_topics`, optional `target_count`/`target_unit`), and detecting deadlines.
+2. Creates a goal row in Supabase with `agent_name`, `personality`, `priority`, and `config`.
+3. Asks the user (via Telegram inline buttons) whether they've tried this before (sets personality to warm/strict and priority to normal/high), then asks for nudge and log-check schedules.
+4. An agent runs on every tick for that goal, building its system prompt dynamically from goal metadata.
 
 The coordinator runs after all per-goal agents finish. It reads agent states, detects patterns, generates messages via LLM (with Exa content), deduplicates, and dispatches Telegram messages.
 
-**From the user's perspective:** They talk to named companions (Sleep, Fitness, Budget, Social, Focus) via Telegram — no agent/LLM language is exposed.
+**From the user's perspective:** They talk to named agents (Leetcode, Sleep, CUDA, Thesis, etc.) via Telegram -- each name is LLM-generated during goal creation.
 
 ---
 
-## 2. Three Operating Modes
+## 2. Operating Modes
 
 ### Mode 1: RESPONSIVE (user reaches out first)
 The user logs something or sends a command. Bot responds to WHAT THEY SAID.
 
 | Input | Response |
 |---|---|
-| Text log (e.g. "went for a 5K run") | **Always replies.** LLM classifies with confidence. If confident (>= 0.7): auto-routes. Agent responds: nudge/call/escalate = 1-2 sentence message + Exa links; monitor = brief ack ("Got it, you're on track"); dedup = short ack ("Logged under X"). If uncertain (< 0.7): asks user to confirm via inline buttons. If brand-new goal with no agent state: runs that single agent first, then responds. |
-| `/status` | 5-line goal health check. One line per goal. Emoji + name + 4-tier status label. |
+| Text log (e.g. "went for a 5K run") | Always replies. LLM classifies with confidence. If confident (>= 0.7): auto-routes. Agent responds: nudge/call/escalate = 1-2 sentence message + Exa links; monitor = brief ack ("Got it, you're on track"); dedup = short ack ("Logged under X"). If uncertain (< 0.7): asks user to confirm via inline buttons. |
+| `/list` | All active goals with agent_name, goal name, status label, and priority tag. No LLM. |
 | `/confused` | hackbitz names ONE thing to focus on today + why. 3-4 sentences max. |
 | `/plan` | Today's top 3 priorities given current state. Ordered list. |
-| `/checkin` | Full fresh analysis. Acks immediately, runs agents in background (~60s), then sends hackbitz narrative. |
-| `/addgoal <description>` | LLM parses free text → creates goal in DB → confirmation. |
-| `/deletegoal` | Numbered list of active goals with emojis. |
+| `/checkin` | Full structured check-in. Acks immediately, runs agents in background (~60s), then sends hackbitz scorecard (going well / needs attention / streaks / top priority). |
+| `/addgoal <description>` | LLM parses free text -> creates goal in DB -> multi-step flow: experience question (new/failed) -> nudge schedule -> logcheck schedule. Deadline goals skip experience question. |
+| `/deletegoal` | Numbered list of active goals. |
 | `/deletegoal <N>` | Deactivates goal by number. |
-| `/reset` | Confirmation prompt → wipes all goals, logs, agent states, interventions, Supermemory. User starts fresh. |
+| `/reset` | Confirmation prompt -> wipes all data. |
 | `/help` | What the bot can do. |
 
 ### Mode 2: PROACTIVE, PATTERN-TRIGGERED (bot reaches out first)
-Not time-based. Pattern-based. Bot speaks when a threshold is crossed, not on a clock.
+Pattern-based. Bot speaks when a threshold is crossed.
 
 | Trigger | Who speaks | What they say |
 |---|---|---|
-| Same agent in "concerned" state for 3+ consecutive ticks | That agent only | 2-3 sentences. Direct but warm. Exa link (LLM-chosen flavor). |
-| 2+ agents "concerned" simultaneously | hackbitz (coordinator) | Simplification: "Focus on X. Y and Z can wait." Exa link. |
-| Agent flips from "concerned" → "monitoring" (win!) | That agent | 1 warm sentence celebrating the win. |
+| Same agent in "concerned" state for 3+ consecutive ticks | That agent (by agent_name) | 2-3 sentences. Tone matches personality. Exa links. |
+| 2+ agents "concerned" simultaneously | hackbitz (coordinator) | Simplification: "Focus on X. Y and Z can wait." Priority-aware. Exa links. |
+| Agent flips from "concerned" -> "monitoring" (win!) | That agent | 1 warm sentence celebrating the win. |
+| Scheduled nudge time (per-goal cron) | That agent | Motivational reminder. Tone matches personality. |
+| Scheduled log-check time (per-goal cron) | That agent | "How did it go? Log your progress." Strict or warm tone. |
+| Nightly summary time (derived from bedtime or default 10pm) | hackbitz | Coordinated scorecard: 1 line per goal, critical goals first, tomorrow's focus. |
+| Agent suggests goal adjustment (adaptive difficulty) | That agent | "Want to adjust the goal to X?" with confirm/skip buttons. |
 
 ### Mode 3: SILENT (default, most common)
-- Everything monitoring → no message.
-- Dedup active (already messaged in last 6h) → no message.
-- Cron runs silently, agents update states → no Telegram.
-
-Silence is a feature. The bot staying quiet when things are fine is what makes it trusted when it does speak.
+- Everything monitoring -> no message.
+- Dedup active (already messaged in last 6h) -> no message.
+- Cron runs silently, agents update states -> no Telegram.
 
 ---
 
 ## 3. Agent Personas & Telegram Format
 
-Every message in Telegram is headed by a bold label.
+No emojis in any messages. Every message header uses bold agent name.
 
-| Source | Telegram label | Emoji | Voice stance |
-|---|---|---|---|
-| Coordinator / multi-agent / commands | `⚡ *hackbitz*` | ⚡ | "I've looked at everything going on and" |
-| Sleep agent | `🌙 *Sleep*` | 🌙 | "I've gone through your sleep updates and" |
-| Fitness agent | `🏃 *Fitness*` | 🏃 | "I've looked at your fitness logs and" |
-| Money agent | `💰 *Budget*` | 💰 | "I've been through your spending and" |
-| Social agent | `🤝 *Social*` | 🤝 | "I've gone through your recent updates and" |
-| Assignment / short-lived | `📚 *Focus*` | 📚 | "I've looked at where you are with your deadline and" |
+| Source | Telegram header | Notes |
+|---|---|---|
+| Coordinator / multi-agent / commands | `*hackbitz*` | Cross-goal coordination |
+| Any goal agent | `*{agent_name}*` | LLM-generated name: "Sleep", "Leetcode", "CUDA", "Thesis", etc. |
 
 **Message format:**
 ```
-🌙 *Sleep*
+*Leetcode*
 
-I've gone through your sleep updates and three nights under 4 hours is something I want to help you fix. Let's get tonight right — even midnight works.
+I've looked at your logs and you've been hitting about 5 problems a day -- solid consistency. Want to push for 7 tomorrow?
 
-Here's a fun fact that might reframe this:
-[Why 6 hours isn't enough — the science](url)
-"Sleep debt compounds faster than most people realize..."
+Here's something worth reading:
+[How to approach hard problems](url)
+"Breaking down complex problems into smaller steps..."
 ```
 
 **Voice rules (enforced in all LLM system prompts):**
-- Speak directly to them like a helpful friend. Use phrases like "I've gone through your updates", "Let me help you with this", "Here's what I think you should do", "I can see what's happening".
+- Speak directly to them like a helpful friend.
 - Always first person. Never "the user". Never "companion" or "agent".
-- Respond to what they said — start from their words, not from the analysis.
+- Respond to what they said -- start from their words, not from the analysis.
+- Do not include any emojis.
+- Tone adapts to `personality`: strict = blunt, no sugarcoating; warm = encouraging, celebrates small wins.
 
 ---
 
@@ -107,62 +108,43 @@ Here's a fun fact that might reframe this:
 ```
 User Input
   [Webapp]                          [Telegram Bot @hackbitz_bot]
-  POST /api/logs (classify+save)    → telegram_webhook (classify+save)
+  POST /api/logs (classify+save)    -> telegram_webhook (classify+save)
        |                                      |
        | fire-and-forget                      | .spawn()
-       ↓                                      ↓
+       v                                      v
   trigger_tick_for_user            _tick_for_user(mode, goal_id, log)
        |                                      |
-       +──────────────────────────────────────+
+       +--------------------------------------+
                           |
                    [Supabase DB: user_logs]
                           |
             Modal Agent Network
             (cron every 30 min + reactive on log save)
+            (nudge cron every 5 min)
             |
             |-- Load active goals from DB
-            |-- For each goal, run agent template in parallel (.map):
-            |   |-- reads own goal logs (last 7-14 days, capped at 10)
-            |   |-- reads peer agent_states (get_peer_states())
-            |   |-- queries Supermemory for cross-goal context (capped at 4 results)
-            |   |-- calls Groq 8b LLM → { status, next_action, message_to_user }
-            |   |-- writes agent_states (+ appends to state_history, max 7 entries)
+            |-- For each goal, run DynamicAgent in parallel (.map):
+            |   |-- reads goal metadata (agent_name, personality, priority)
+            |   |-- builds system prompt dynamically from goal config
+            |   |-- reads own goal logs (last 7 days, capped at 10)
+            |   |-- reads peer agent_states with priority info
+            |   |-- queries Supermemory for cross-goal context
+            |   |-- calls Groq 8b LLM -> AgentResult (including optional goal_adjustment)
+            |   |-- writes agent_states (+ state_history, max 7 entries)
             |   +-- saves observations to Supermemory
             |
             +-- Coordinator (runs after all agents settle)
                 |
                 Modes:
-                |-- reactive_log: respond on behalf of matching agent to user's log
-                |   |-- if monitor → silent
-                |   |-- dedup: skip if intervention for this goal in last 6h
-                |   |-- LLM (70b) generates 1-2 sentence agent-voice reply
-                |   |-- if nudge/call/escalate → Exa (LLM picks flavor)
-                |   +-- sends Telegram, logs intervention
+                |-- reactive_log: respond on behalf of matching agent
+                |-- pattern_check: detect patterns + goal adjustments + wins
+                |-- win: standalone win celebration
+                |-- checkin: structured life snapshot
                 |
-                |-- pattern_check: detect 3+ consecutive ticks in concerning state
-                |   |-- check for wins (concerned→monitoring flip)
-                |   |-- if 0 patterns + wins: send win messages, done
-                |   |-- dedup: skip if any intervention in last 6h
-                |   |-- if 2+ patterns: hackbitz simplification (70b) + Exa
-                |   |-- if 1 pattern: single-agent message (70b) + Exa
-                |   +-- sends Telegram, logs intervention
-                |
-                |-- win: standalone win celebration (bypasses dedup)
-                |
-                +-- checkin: full life snapshot (user-triggered via /checkin)
-                    |-- reads fresh agent states (just run by _tick_for_user)
-                    |-- hackbitz (70b): "what's good, what needs attention, one priority"
-                    |-- Exa for top concern (LLM picks flavor)
-                    +-- sends Telegram
-
-[Telegram] ←──── coordinator sends message ──── [Supabase: interventions]
-    |
-    | user replies
-    ↓
-telegram_webhook → classify log (with confidence)
-    |-- confident (>= 0.7): save with goal_id → spawn _tick_for_user
-    |-- uncertain (< 0.7): save without goal_id → send inline buttons asking user to confirm
-    |-- callback_query: user confirms → update log goal_id → spawn _tick_for_user
+            +-- Scheduled Nudge Tick (every 5 min)
+                |-- For each goal: check nudge_schedule / logcheck_schedule via croniter
+                |-- Send nudge or logcheck reminders
+                +-- Nightly summary at user's bedtime (or 10pm default)
 ```
 
 ---
@@ -174,20 +156,32 @@ telegram_webhook → classify log (with confidence)
 |--------|------|-------|
 | id | uuid (PK) | |
 | user_id | uuid | |
-| name | text | e.g. "Gym 3x/week" |
+| name | text | e.g. "Daily Leetcode Practice" |
 | type | text | `habit`, `target`, `short_lived` |
 | agent_template | text | `fitness`, `sleep`, `money`, `social`, `custom`, `short_lived` |
-| config | jsonb | e.g. `{ "frequency_per_week": 3 }` |
+| agent_name | text | LLM-generated display name: "Leetcode", "Sleep", "CUDA", "Thesis". Default: "Goal". |
+| personality | text | `warm` or `strict`. Controls agent tone. Default: "warm". |
+| priority | text | `normal`, `high`, or `critical`. Affects coordinator tiebreaks. Default: "normal". |
+| config | jsonb | See config fields below |
 | active | boolean | default true |
-| end_at | timestamptz | nullable; for short-lived goals |
+| end_at | timestamptz | nullable; for deadline goals |
 | created_at | timestamptz | default now() |
+
+**Config jsonb fields:**
+- `domain_topics` (list[str]): LLM-generated search terms for Exa content (e.g. ["leetcode", "competitive programming"])
+- `target_count` (number or null): measurable numeric target (e.g. 10 for "10 problems"). null for binary habits.
+- `target_unit` (string or null): unit for target_count ("problems", "hours", "km"). null when target_count is null.
+- `nudge_schedule` (string or null): cron expression for reminder nudges (e.g. "0 9 * * *")
+- `logcheck_schedule` (string or null): cron expression for log-check reminders (e.g. "0 22 * * *")
+- `frequency_per_week` (number or null): how often per week
+- Plus any domain-specific fields (target_hours, weekly_budget, success_criteria, etc.)
 
 ### user_logs
 | Column | Type | Notes |
 |--------|------|-------|
 | id | uuid (PK) | |
 | user_id | uuid | |
-| goal_id | uuid (nullable) | FK to goals; auto-classified by LLM (webapp + telegram webhook) |
+| goal_id | uuid (nullable) | FK to goals; auto-classified by LLM |
 | content | text | free-text log entry |
 | source | text | `manual_input`, `agent_checkin` |
 | created_at | timestamptz | default now() |
@@ -198,8 +192,8 @@ telegram_webhook → classify log (with confidence)
 | id | uuid (PK) | |
 | user_id | uuid | |
 | goal_id | uuid | FK to goals (unique per user+goal) |
-| state | jsonb | `{ last_checkin, pattern_detected, confidence, context_summary, next_action, next_action_time }` |
-| state_history | jsonb | Array of last 7 `{ next_action, confidence, updated_at }` entries. Added by migration 003. |
+| state | jsonb | `{ last_checkin, pattern_detected, confidence, context_summary, next_action, next_action_time, goal_adjustment }` |
+| state_history | jsonb | Array of last 7 `{ next_action, confidence, updated_at }` entries |
 | updated_at | timestamptz | default now() |
 
 ### interventions
@@ -208,12 +202,12 @@ telegram_webhook → classify log (with confidence)
 | id | uuid (PK) | |
 | user_id | uuid | |
 | goal_id | uuid (nullable) | |
-| triggered_by | text[] | agent/goal names that triggered this |
-| intervention_type | text | `nudge`, `call`, `escalate`, `pattern_multi`, `reactive_log` |
+| triggered_by | text[] | agent names that triggered this |
+| intervention_type | text | `nudge`, `call`, `escalate`, `pattern_multi`, `reactive_log`, `nightly_summary` |
 | reason | text | |
 | scheduled_for | timestamptz | |
-| executed | boolean | default false — set true after Telegram delivery |
-| delivered_at | timestamptz | set when Telegram send succeeds (requires migration 002) |
+| executed | boolean | default false |
+| delivered_at | timestamptz | |
 | outcome | text (nullable) | |
 | created_at | timestamptz | default now() |
 
@@ -223,7 +217,7 @@ telegram_webhook → classify log (with confidence)
 | id | uuid (PK) | |
 | user_id | uuid | |
 | goal_id | uuid (nullable) | |
-| from_agent | text | `{template}:{goal_id}` |
+| from_agent | text | `{agent_name}:{goal_id}` |
 | to_agent | text (nullable) | null = broadcast |
 | message | text | |
 | context | jsonb (nullable) | |
@@ -236,46 +230,39 @@ telegram_webhook → classify log (with confidence)
 | user_id | uuid | unique; used in goals, user_logs, agent_states, etc. |
 | created_at | timestamptz | default now() |
 
-One row per Telegram chat. Webhook calls `get_or_create_user_by_telegram_chat(chat_id)` to resolve or create user_id; coordinator calls `get_telegram_chat_id(user_id)` when sending so each user gets messages in their own chat.
-
 ---
 
-## 6. Agent Templates
+## 6. Dynamic Agent Architecture
 
-Each template receives `(user_id, goal_id, config)` and:
-1. Loads recent `user_logs` from Supabase (scoped to goal_id, last 7-14 days, capped at 10 entries).
-2. Queries Supermemory for cross-goal semantic context (capped at 4-8 results).
-3. Calls `get_peer_states(user_id, exclude_goal_id)` — reads all other agents' current `agent_states`.
-4. Calls Groq `llama-3.1-8b-instant` with the combined prompt → returns `AgentResult`.
-5. Writes `agent_states` (with `state_history` append) to Supabase + saves observations to Supermemory.
+**File:** `backend/modal_app/agents/dynamic.py`
 
-**Note:** Agents no longer call Exa directly. Exa is called exclusively by the coordinator after reading agent states.
+All goals use a single `DynamicAgent` class. No pre-built templates (fitness.py, sleep.py, etc. have been removed). The agent builds its system prompt at runtime from goal metadata:
 
-Templates:
-- **Fitness** — skip detection, backs off if sleep agent is escalating.
-- **Sleep** — duration/consistency tracking, highest priority in coordinator.
-- **Money** — spending spike detection, stress-spending correlation.
-- **Social** — isolation detection, emotional state monitoring.
-- **Short-lived** — deadline-aware progress tracking, auto-deactivates after `end_at`.
+1. **Identity:** "You are {agent_name}, an accountability partner tracking the goal: {goal_name}."
+2. **Personality:** warm (encouraging, celebrates wins) or strict (blunt, calls out misses).
+3. **Priority:** critical (deadline, highest urgency), high (user has failed before), normal (default).
+4. **Deadline awareness:** days remaining if `end_at` is set.
+5. **Quantifiable target:** If `target_count` is set, agent compares user output against target and can suggest adjustments. If null, tracks done/not-done consistency.
+6. **Output format:** JSON with status, next_action, reasoning, confidence, message_to_user, and optional goal_adjustment.
 
 ### AgentResult fields
 ```python
 status: str               # "monitoring" | "concerned" | "intervention_needed"
 next_action: str          # "monitor" | "nudge" | "call" | "escalate"
 reasoning: str
-confidence: float         # 0.0–1.0
-context_summary: str      # truncated to 500 chars; used by coordinator for Exa flavor selection
-message_to_user: str|None # saved to agent_messages; not directly sent to Telegram
-content_suggestions: list[dict]  # unused by coordinator (coordinator does its own Exa calls)
+confidence: float         # 0.0-1.0
+context_summary: str      # truncated to 500 chars
+message_to_user: str|None # saved to agent_messages
+goal_adjustment: dict|None # {"direction": "easier"|"harder", "suggestion": "...", "new_config": {...}} -- only for quantifiable goals
 ```
 
 ### get_peer_states() (BaseAgent method)
-Reads all `agent_states` for the user (excluding own goal), formats as:
+Reads all `agent_states` for the user (excluding own goal), formats with priority:
 ```
-- Sleep companion (Sleep 8h): escalate (confidence 0.92) — "concerned". Context: ...
-- Fitness companion (Gym 3x): monitor (confidence 0.4)
+- Sleep (Sleep 7h/night): escalate, priority=normal (confidence 0.92). Context: ...
+- Thesis (Finish thesis): monitor, priority=critical (confidence 0.4)
 ```
-Injected into every agent's LLM prompt so agents self-regulate without a central coordinator pre-run.
+Agents self-regulate: a strict gym agent sees a critical thesis in escalate and eases off.
 
 ---
 
@@ -283,51 +270,72 @@ Injected into every agent's LLM prompt so agents self-regulate without a central
 
 **File:** `backend/modal_app/coordinator.py`
 
+### Priority engine
+
+Replaces hardcoded `TEMPLATE_PRIORITY`. All tiebreaks use goal priority + severity:
+
+```python
+PRIORITY_ORDER = {"critical": 0, "high": 1, "normal": 2}
+SEVERITY_ORDER = {"escalate": 0, "call": 1, "nudge": 2, "monitor": 3}
+```
+
+`_sort_by_priority()` sorts agent states by priority first, then severity. Critical deadline goals always win over normal habits.
+
 ### Key constants
 
 ```python
-AGENT_PERSONAS   # label, emoji, header, voice starter per template
-ACTION_TO_STATUS = {
-    "monitor":  "✅ on track",
-    "nudge":    "⚠️ watch this",
-    "call":     "⚠️ needs attention",
-    "escalate": "🔴 off track",
+ACTION_TO_LABEL = {
+    "monitor": "on track",
+    "nudge": "watch this",
+    "call": "needs attention",
+    "escalate": "off track",
 }
-TEMPLATE_PRIORITY = ["sleep", "fitness", "money", "social", "short_lived", "custom"]
 ```
 
 ### coordinate_for_user(user_id, llm_fn, mode, source_goal_id, trigger_log)
 
 | Mode | Trigger | Behavior |
 |---|---|---|
-| `reactive_log` | User sent a text log | Responds on behalf of matching agent. Silent if monitor. Exa on nudge/call/escalate. |
-| `pattern_check` | Cron tick (default) | Detect 3+ tick patterns + wins. Dedup (6h global). hackbitz or single-agent message + Exa. |
+| `reactive_log` | User sent a text log | Responds on behalf of matching agent. Brief ack if monitor. Exa on nudge/call/escalate. |
+| `pattern_check` | Cron tick (default) | Detect 3+ tick patterns + wins + goal adjustments. Priority-aware tiebreaking. |
 | `win` | Agent flipped from pattern to monitor | Standalone win celebration (bypasses dedup). |
-| `checkin` | User sent `/checkin` | Full life snapshot. hackbitz narrative + Exa for top concern. |
+| `checkin` | User sent `/checkin` | Structured life snapshot with scorecard. |
 
-### Command handlers (synchronous, no spawn)
+### Command handlers
 
 | Function | Command | Notes |
 |---|---|---|
-| `handle_status_command(user_id)` | `/status` | Reads last known agent states. Returns 4-tier labeled list. No LLM. |
+| `handle_list_command(user_id)` | `/list` | Active goals with agent_name, status, priority. No LLM. |
 | `handle_confused_command(user_id, llm_fn)` | `/confused` | hackbitz names ONE focus. LLM (70b). |
 | `handle_plan_command(user_id, llm_fn)` | `/plan` | hackbitz top 3 priorities. LLM (70b). |
-| `handle_addgoal_command(description, user_id, llm_fn)` | `/addgoal <desc>` | Calls `_parse_and_create_goal`. Empty desc → usage hint. |
-| `handle_deletegoal_list_command(user_id)` | `/deletegoal` | Numbered list of active goals with emojis. No LLM. |
-| `handle_deletegoal_number_command(user_id, number)` | `/deletegoal <N>` | Deactivates goal by sort position. Graceful out-of-range error. |
+| `handle_addgoal_command(desc, user_id, llm_fn)` | `/addgoal <desc>` | Returns (goal, error_text). Caller handles multi-step flow. |
+| `handle_deletegoal_list_command(user_id)` | `/deletegoal` | Numbered list. No LLM. |
+| `handle_deletegoal_number_command(user_id, number)` | `/deletegoal <N>` | Deactivates goal by position. |
+| `handle_nightly_summary(user_id, llm_fn)` | (scheduled) | Coordinated evening wrap-up. |
+| `generate_nudge_message(goal, user_id, llm_fn)` | (scheduled) | Per-goal nudge. |
+| `generate_logcheck_message(goal)` | (scheduled) | Per-goal log check (no LLM). |
 
 ### _parse_and_create_goal(description, user_id, llm_fn)
-LLM (70b) extracts `{ name, agent_template, type, config, end_at }` from free text → `db.create_goal(...)`.
+LLM (70b) extracts: `{ name, agent_name, agent_template, type, has_deadline, config, end_at }`.
 
-Config fields extracted per template:
-- sleep: `{ target_hours, target_bedtime }`
-- fitness: `{ frequency_per_week, target }`
-- money: `{ weekly_budget, watch_categories }`
-- social: `{ min_social_per_week }`
-- short_lived: `{ end_date, success_criteria }`
+Config includes `domain_topics`, `target_count`, `target_unit`, and domain-specific fields. If `has_deadline` is true, goal gets `personality=strict`, `priority=critical` automatically.
 
-### Content flavor selection (no LLM call)
-Flavors are picked deterministically per template via `TEMPLATE_FLAVOR_SETS` in `exa_client.py` — no extra LLM call. Each template has a curated set of 3 flavors (e.g. sleep: science, article, app; fitness: article, video, person). `search_content_multi(topic, template, trigger_log, count=3)` fetches one result per flavor and deduplicates URLs.
+### Multi-step /addgoal flow (handled in app.py callbacks)
+
+1. LLM creates goal with agent_name.
+2. **Deadline goals:** skip to nudge schedule question.
+3. **Non-deadline goals:** ask experience ("New to this" / "Tried before, need to get serious").
+   - New -> personality=warm, priority=normal
+   - Failed -> personality=strict, priority=high
+4. Ask nudge schedule (9am / 7pm / Custom).
+5. Ask logcheck schedule (10pm / 8pm / Custom).
+6. Confirmation with agent_name and personality tone.
+
+### Adaptive goal difficulty
+- Only for goals with `target_count` in config.
+- Agent returns `goal_adjustment` in its result when pattern suggests adjustment.
+- Coordinator sends inline buttons: "Yes, adjust" / "Keep as is".
+- On confirm: updates `goals.config` with `new_config`.
 
 ---
 
@@ -335,14 +343,9 @@ Flavors are picked deterministically per template via `TEMPLATE_FLAVOR_SETS` in 
 
 **File:** `backend/shared/exa_client.py`
 
-Uses REST API directly (`requests` library, no SDK):
-```python
-POST https://api.exa.ai/search
-headers: { x-api-key: EXA_API_KEY }
-body: { query, numResults: 1, type: "auto", contents: { highlights: { numSentences: 2 } } }
-```
+Uses REST API directly (`requests` library, no SDK).
 
-### 10 Content Flavors
+### 10 Content Flavors (no emojis)
 
 | Flavor | Query template | Intro sentence |
 |---|---|---|
@@ -353,27 +356,13 @@ body: { query, numResults: 1, type: "auto", contents: { highlights: { numSentenc
 | `person` | `{topic} experts creators to follow` | "Someone worth following on this:" |
 | `podcast` | `best {topic} podcast episode` | "A podcast episode on exactly this:" |
 | `app` | `best app for {topic} 2024` | "There's an app that might actually help:" |
-| `community` | `{topic} community Reddit Discord forum` | "You're not alone — there's a community for this:" |
+| `community` | `{topic} community Reddit Discord forum` | "You're not alone -- there's a community for this:" |
 | `job` | `{topic} career jobs opportunities` | "Something that caught my eye on the opportunity side:" |
 | `news` | `latest {topic} research news 2025` | "What's new in this space:" |
 
-`search_content_multi()` returns a list of `{ title, url, snippet, flavor, flavor_label, intro }` (up to 3). `search_content_varied()` still available for single-result use.
+`search_content_multi(topics, trigger_log, count)` accepts `topics: list[str]` from `goal.config.domain_topics`. Picks random flavors. Returns up to `count` results with deduped URLs. Fallback if no domain_topics: uses goal name.
 
-### When Exa fires
-- **Reactive log:** `nudge`, `call`, or `escalate` state (monitor = silent). Returns 2-3 links across different flavors.
-- **Pattern check (single agent):** always. 2-3 links.
-- **Pattern check (multi-agent hackbitz):** always. 2-3 links for the primary concern.
-- **Checkin:** for top concern by `TEMPLATE_PRIORITY` order. 2-3 links.
-- Each link has its own intro sentence from the flavor config.
-
-### Domain topics (DOMAIN_TOPICS)
-```python
-"sleep":      ["sleep optimization", "sleep science", "circadian rhythm"]
-"fitness":    ["running training", "5K prep", "endurance running"]
-"money":      ["personal finance", "budgeting", "financial wellness"]
-"social":     ["social wellbeing", "relationships", "loneliness prevention"]
-"short_lived":["deep work", "productivity under pressure", "focus techniques"]
-```
+No hardcoded `DOMAIN_TOPICS` or `TEMPLATE_FLAVOR_SETS` -- everything is dynamic per goal.
 
 ---
 
@@ -383,66 +372,71 @@ body: { query, numResults: 1, type: "auto", contents: { highlights: { numSentenc
 
 **Bot:** `@hackbitz_bot` (token in Modal secrets + `backend/.env`)
 
-**send_message(chat_id, text):**
-- POSTs to `https://api.telegram.org/bot{TOKEN}/sendMessage`
-- Uses Markdown formatting
-- Returns True/False
-
-**parse_webhook_update(body):**
-- Extracts `{chat_id, text}` from Telegram webhook payload
-- Returns None for non-text or unsupported updates
-
-**Webhook URL:** `https://khalatevarun--lifeos-agents-telegram-webhook.modal.run`
-Registered via: `GET https://api.telegram.org/bot{TOKEN}/setWebhook?url=<webhook_url>`
+### Functions
+- `send_message(chat_id, text)` -- Markdown formatting
+- `send_message_with_buttons(chat_id, text, buttons)` -- inline keyboard
+- `answer_callback_query(callback_query_id, text)` -- ack button press
+- `parse_webhook_update(body)` -- extracts message or callback data
 
 ### Command routing (in telegram_webhook)
 
 ```
-/status        → handle_status_command (sync, no LLM)
-/confused      → handle_confused_command (sync, LLM 70b)
-/plan          → handle_plan_command (sync, LLM 70b)
-/help          → HELP_TEXT constant
-/checkin       → ack immediately + _tick_for_user.spawn(mode="checkin")
-/deletegoal    → handle_deletegoal_list_command (sync, no LLM)
-/deletegoal N  → handle_deletegoal_number_command (sync, no LLM)
-/addgoal <desc>→ handle_addgoal_command (sync, LLM 70b for parsing)
-text log       → classify to goal_id → save to user_logs → _tick_for_user.spawn(mode="reactive_log")
+/list          -> handle_list_command (sync, no LLM)
+/confused      -> handle_confused_command (sync, LLM 70b)
+/plan          -> handle_plan_command (sync, LLM 70b)
+/help          -> HELP_TEXT constant
+/checkin       -> ack immediately + _tick_for_user.spawn(mode="checkin")
+/deletegoal    -> handle_deletegoal_list_command (sync, no LLM)
+/deletegoal N  -> handle_deletegoal_number_command (sync, no LLM)
+/addgoal <desc>-> handle_addgoal_command + multi-step inline buttons
+/reset         -> confirmation inline buttons
+text log       -> classify to goal_id -> save to user_logs -> spawn _tick_for_user
 ```
 
-**`/checkin` is async:** Bot immediately sends `"⚡ *hackbitz*\n\nOn it — checking in on everything right now. Give me a minute."`, then spawns `_tick_for_user` in `checkin` mode. The full summary arrives ~60s later.
+### Callback query routing
+
+```
+cls:c:<log_id>:<goal_id>           -> confirm log classification
+cls:s:<log_id>                     -> skip classification
+cls:n:<log_id>                     -> prompt for /addgoal
+addgoal:exp:<goal_id>:<new|failed> -> set personality/priority
+addgoal:nudge:<goal_id>:<time>     -> set nudge_schedule
+addgoal:logcheck:<goal_id>:<time>  -> set logcheck_schedule
+adjust:yes:<goal_id>               -> apply goal adjustment
+adjust:no:<goal_id>                -> skip goal adjustment
+reset:confirm                      -> wipe all data
+reset:cancel                       -> cancel wipe
+```
 
 ---
 
 ## 10. Modal Implementation
 
-**Secrets:** `modal.Secret.from_name("lifeos-secrets")` — stores:
+**Secrets:** `modal.Secret.from_name("lifeos-secrets")` -- stores:
 `SUPABASE_URL`, `SUPABASE_SERVICE_KEY`, `SUPERMEMORY_API_KEY`, `GROQ_API_KEY`, `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID`, `EXA_API_KEY`
 
-**Image packages:** `supabase`, `supermemory`, `python-dotenv`, `fastapi[standard]`, `groq`, `exa-py`, `requests`
+**Image packages:** `supabase`, `supermemory`, `python-dotenv`, `fastapi[standard]`, `groq`, `exa-py`, `requests`, `croniter`
 
 **Functions:**
 
 | Function | Type | Timeout | Notes |
 |---|---|---|---|
-| `run_agent_for_goal(goal)` | Modal fn | 120s | Runs one agent, uses `_llm_call` (8b) |
-| `run_coordinator(user_id, mode, ...)` | Modal fn | 120s | Uses `_llm_call_coordinator` (70b) |
-| `tick()` | Cron (*/30) | 300s | Loads all active goals, maps agents + coordinator (pattern_check) |
+| `run_agent_for_goal(goal)` | Modal fn | 120s | Runs DynamicAgent, passes goal_meta |
+| `run_coordinator(user_id, mode, ...)` | Modal fn | 120s | Uses 70b model |
+| `tick()` | Cron (*/30) | 300s | Heartbeat: agents + pattern_check |
+| `scheduled_nudge_tick()` | Cron (*/5) | 300s | Per-goal nudge/logcheck + nightly summary |
 | `trigger_tick()` | POST endpoint | 300s | Manual trigger for all users |
-| `trigger_tick_for_user(body)` | POST endpoint | 300s | Per-user reactive trigger (called after webapp log save) |
-| `telegram_webhook(body)` | POST endpoint | 60s | Receives bot messages, routes commands or classifies + saves + spawns |
-| `_tick_for_user(user_id, mode, source_goal_id, trigger_log)` | Modal fn | 300s | Internal: agents + coordinator for one user. Called via `.spawn()` |
+| `trigger_tick_for_user(body)` | POST endpoint | 300s | Per-user reactive trigger |
+| `telegram_webhook(body)` | POST endpoint | 60s | Commands, text logs, callbacks |
+| `_tick_for_user(user_id, mode, ...)` | Modal fn | 300s | Internal: agents + coordinator |
 
-**`_tick_for_user` modes:**
-- `"reactive_log"` — user just sent a text log; agents run, coordinator responds on behalf of matching agent.
-- `"pattern_check"` — cron default; detect 3+ tick patterns.
-- `"checkin"` — user sent `/checkin`; agents run fresh, coordinator sends full life snapshot.
-
-**Endpoints:**
-```
-trigger_tick:          https://khalatevarun--lifeos-agents-trigger-tick.modal.run
-trigger_tick_for_user: https://khalatevarun--lifeos-agents-trigger-tick-for-user.modal.run
-telegram_webhook:      https://khalatevarun--lifeos-agents-telegram-webhook.modal.run
-```
+### scheduled_nudge_tick() -- every 5 minutes
+1. Loads all active goals, groups by user.
+2. For each goal with `nudge_schedule` or `logcheck_schedule` in config:
+   - Uses `croniter` to check if the cron should have fired in the last 5 minutes.
+   - Nudge: sends personality-styled motivational message via LLM.
+   - Log-check: checks if user logged today; if not, sends reminder.
+3. Nightly summary: checks if it's the user's summary hour (from sleep goal's `target_bedtime` or default 22:00). If so, runs `handle_nightly_summary`.
 
 ---
 
@@ -463,77 +457,61 @@ resp = client.search.memories(
     limit=limit,
     threshold=threshold,
 )
-# resp.results[i] has: .id, .memory, .chunk, .similarity, .metadata
 ```
 
 **What gets stored:** agent observations (when status != monitoring), coordinator decisions. Cross-goal context is retrieved via semantic search before each agent LLM call.
 
 ---
 
-## 12. Frontend — LLM-Powered UX
+## 12. Frontend -- LLM-Powered UX
 
 ### Goal creation
 User types free-form: *"I want to sleep 8 hours a night"*
 
-`POST /api/goals` calls Groq (`llama-3.1-8b-instant`) to classify into `{ agent_template, goal_type, name, config }`.
-
-Goals can also be created via Telegram with `/addgoal <description>` — same LLM parsing logic, runs in `coordinator.py`.
+`POST /api/goals` calls Groq (`llama-3.1-8b-instant`) to classify. Goals can also be created via Telegram with `/addgoal <description>` -- multi-step flow with personality and schedule questions.
 
 ### Log auto-routing
-User types free-form: *"Skipped the gym again, feeling exhausted"*
-
-`POST /api/logs` classifies to nearest active goal via Groq, saves with `goal_id`, then fires non-blocking `fetch` to `MODAL_TRIGGER_URL_FOR_USER` (reactive tick).
+`POST /api/logs` classifies to nearest active goal via Groq, saves with `goal_id`, then fires reactive tick.
 
 ### Companion chat (`agent-chat.tsx`)
-- Messages labeled by template: Fitness / Sleep / Money / Social / Deadline / All companions
-- When `context.content_suggestions` is present, renders clickable link cards below message
+- Messages labeled by agent_name
+- Content suggestions render as clickable link cards
 
 ---
 
 ## 13. Current State (as of 2026-02-28)
 
 ### Working
-- All 5 Supabase tables live and seeded with demo data.
-- Modal app deployed: cron (30 min) + manual trigger + reactive trigger + telegram webhook.
+- All Supabase tables live (goals with agent_name/personality/priority columns).
+- Modal app deployed: 30-min heartbeat cron + 5-min nudge cron + reactive trigger + telegram webhook.
 - Two-model Groq setup: 8b for agents (500K/day), 70b for coordinator (100K/day).
-- All 5 agent templates with peer-state awareness (`get_peer_states()`).
-- Coordinator: 4 modes (`reactive_log`, `pattern_check`, `win`, `checkin`).
-- Pattern detection: 3+ consecutive ticks in concerning state → Telegram message.
-- Win detection: agent flips from concerned → monitoring → celebration message.
-- Exa: 10 content flavors, 2-3 links per message across different flavors (deterministic per template, no LLM call). Each link has its own intro sentence.
-- 4-tier `/status` labels: ✅ on track / ⚠️ watch this / ⚠️ needs attention / 🔴 off track.
-- Goal management via Telegram: `/addgoal`, `/deletegoal`, `/deletegoal <N>`.
-- `/checkin` command: async full life snapshot with Exa for top concern.
+- **Fully dynamic agent architecture:** single DynamicAgent replaces all 5 template agents. System prompt built at runtime from goal metadata.
+- **Per-goal personality:** warm (encouraging) or strict (no-nonsense). Set during multi-step /addgoal flow.
+- **Dynamic priority engine:** critical > high > normal. Deadline goals auto-set to critical. Priority used in all coordinator tiebreaks.
+- **LLM-generated agent names:** each goal gets a unique persona name (Leetcode, CUDA, Sleep, Thesis, etc.).
+- Coordinator: 4 modes (reactive_log, pattern_check, win, checkin).
+- Pattern detection: 3+ consecutive ticks in concerning state -> Telegram message.
+- Win detection: agent flips from concerned -> monitoring -> celebration message.
+- **Adaptive goal difficulty:** agents can suggest adjusting target_count up/down. Only for quantifiable goals. Inline buttons for confirm/skip.
+- Exa: 10 content flavors (no emojis), dynamic topics from `config.domain_topics`. 2-3 links per message.
+- `/list` command: goals with agent_name, status labels, priority tags.
+- `/checkin` command: structured output (going well / needs attention / streaks / hackbitz says).
+- **Multi-step /addgoal:** LLM creates goal -> experience question -> nudge schedule -> logcheck schedule. Deadline goals skip experience question.
+- **Scheduled nudge/logcheck:** per-goal cron schedules checked every 5 minutes via croniter.
+- **Nightly summary:** coordinated evening wrap-up from hackbitz, priority-aware, cross-agent coordination.
+- **No emojis:** all bot messages are plain text with bold headers. No emojis anywhere.
 - Coordinator dedup: one proactive Telegram message per user per 6h.
-- Telegram delivery: coordinator sends assembled message; user replies saved as logs.
-- Telegram webhook classifies messages with confidence score; auto-routes if >= 0.7, asks user to confirm via inline buttons if < 0.7.
-- Frontend log route returns suggestion for uncertain classifications; UI shows confirmation prompt.
-- Reactive tick: log save (webapp or Telegram) → coordinator responds immediately using latest states, then agents update in background (~3-5s response time instead of ~30s).
-- `state_history` column: last 7 agent state snapshots per goal (migration 003).
-- Voice stance: all LLM prompts use helper framing ("Let me help you with this") not observer framing ("I've noticed").
-- **Multi-user Telegram:** `telegram_user_mapping` links each chat_id to a user_id. Webhook uses `get_or_create_user_by_telegram_chat(chat_id)`; coordinator uses `get_telegram_chat_id(user_id)` to send to the correct chat. New Telegram users get a welcome message on first message.
+- Telegram webhook classifies messages with confidence; asks to confirm if < 0.7.
+- Reactive tick: coordinator responds first (~3-5s), agents update in background.
+- state_history: last 7 agent state snapshots per goal.
+- Multi-user Telegram: telegram_user_mapping links each chat_id to a user_id.
 
 ### Pending
-- Run `supabase/migrations/002_delivery.sql` manually in Supabase SQL editor to add `delivered_at` column. Until then, `mark_intervention_executed` falls back to setting only `executed=true`.
-- Run `supabase/migrations/003_state_history.sql` to add `state_history` column to `agent_states`. Until then, pattern detection won't fire.
-- Run `supabase/migrations/004_telegram_user_mapping.sql` to add the Telegram chat → user mapping table (required for multi-user bot).
-- Web app: no auth — single hardcoded mock user `00000000-0000-0000-0000-000000000001`. Telegram: each chat gets its own user_id via onboarding.
-
-### Issues resolved (full history)
-1. **GPU/vLLM removed** — Switched from A10G + vLLM to Groq free tier.
-2. **Supermemory SDK v3.27.0 breaking change** — Fixed search API call.
-3. **Groq 429 rate limit** — Switched agents to `llama-3.1-8b-instant`; reduced cron to 30 min; capped prompt tokens.
-4. **Dedup broken** — Interventions saved without `goal_id`; dedup was checking `WHERE goal_id = uuid` → never matched. Fixed: dedup now checks by `user_id` only.
-5. **Exa returning 0 results** — `exa-py` SDK `highlights` param format mismatch. Fixed: rewrote client to use REST API via `requests`.
-6. **Telegram logs invisible to agents** — Bot messages saved without `goal_id`; no reactive tick. Fixed: webhook now classifies + spawns `_tick_for_user`.
-7. **`mark_intervention_executed` failing** — `delivered_at` column missing (migration 002 not run). Fixed: fallback to `executed=true` only until migration runs.
-8. **`/status` all showing "needs attention"** — `ACTION_TO_STATUS` map had only 2 distinct labels. Fixed: 4-tier map with ✅/⚠️/🔴.
-9. **Exa never showing for nudge** — Reactive path only triggered Exa for `escalate`. Fixed: fires for `nudge`, `call`, and `escalate`.
-10. **All Telegram users sharing same data** — Webhook and coordinator used single MOCK_USER_ID and TELEGRAM_CHAT_ID. Fixed: `telegram_user_mapping` table, `get_or_create_user_by_telegram_chat` / `get_telegram_chat_id` in supabase_client; webhook resolves user per chat and sends welcome for new users; coordinator `_send_telegram(user_id, text)` looks up chat_id per user.
-11. **Unclassified logs silently dropped** — When LLM couldn't match a log to a goal, it was saved without goal_id and no feedback given. Fixed: classification prompt now returns confidence; uncertain matches (< 0.7) prompt user to confirm via Telegram inline buttons or web UI. Callback queries update the log's goal_id and trigger reactive analysis.
-12. **High latency on reactive messages** — After a user logged something, all agents ran for all goals before the coordinator could respond (~30s). Fixed: for `reactive_log` mode, coordinator responds first using latest DB states, then agents update in the background. Also removed `_pick_exa_flavor` LLM call (was an extra 70b call just to pick a word); flavors are now deterministic per template via `TEMPLATE_FLAVOR_SETS`.
-13. **Exa only sending 1 link** — Coordinator sent a single Exa result per message. Fixed: `search_content_multi()` fetches 2-3 results across different flavors per template (e.g. fitness: article + video + person). `_build_telegram_message` renders each link with its own intro sentence and snippet.
-14. **No reply after logging to a new or on-track goal** — Three silent-exit paths in `_handle_reactive_log`: (a) brand-new goal with no `agent_states` row → coordinator found no matching state → silent. (b) agent state was "monitor" → silent. (c) dedup within 6h → silent. Fixed: (a) `_tick_for_user` now checks if the matched goal has an agent_state; if not, runs that single agent synchronously first. (b) "monitor" now sends a brief ack ("Got it, you're on track"). (c) dedup now sends "Logged under X" instead of silence. Users always get a reply.
+- Run `supabase/migrations/002_delivery.sql` manually to add `delivered_at` column.
+- Run `supabase/migrations/003_state_history.sql` to add `state_history` column.
+- Run `supabase/migrations/004_telegram_user_mapping.sql` for multi-user bot.
+- Run `supabase/migrations/005_dynamic_agents.sql` to add `agent_name`, `personality`, `priority` columns.
+- Web app: no auth -- single hardcoded mock user. Telegram: each chat gets its own user_id.
 
 ---
 
@@ -543,9 +521,9 @@ User types free-form: *"Skipped the gym again, feeling exhausted"*
 # Frontend
 cd lifeos/frontend
 npm run dev
-# → http://localhost:3000
+# -> http://localhost:3000
 
-# Backend — redeploy after changes
+# Backend -- redeploy after changes
 cd lifeos/backend
 source .venv/bin/activate
 modal deploy modal_app/app.py
@@ -559,7 +537,7 @@ cd lifeos/backend
 python reset_user.py                     # reset mock user
 python reset_user.py --chat 123456789    # reset by Telegram chat_id
 python reset_user.py --user <uuid>       # reset by user_id
-python reset_user.py --all               # reset ALL users (asks for confirmation)
+python reset_user.py --all               # reset ALL users
 python reset_user.py --skip-memory       # skip Supermemory wipe
 # Users can also send /reset in Telegram to wipe their own data.
 
@@ -600,64 +578,57 @@ Modal secret (`lifeos-secrets`): all keys above except `NEXT_PUBLIC_*`.
 
 ```
 lifeos/
-├── AGENTS.MD                          # This file — update after every architecture change
-├── backend/
-│   ├── .env                           # Local env (gitignored)
-│   ├── .venv/                         # Python venv
-│   ├── seed_demo.py                   # Seeds 5-goal Burnout Spiral demo (--reset to wipe first)
-│   ├── reset_user.py                  # Wipe all data for a user (Supabase + Supermemory); --user/--chat/--all
-│   ├── modal_app/
-│   │   ├── __init__.py
-│   │   ├── app.py                     # Modal app: two LLM fns, cron, all endpoints, _tick_for_user
-│   │   │                              # Telegram command routing: /status /confused /plan /help
-│   │   │                              # /checkin /addgoal /deletegoal /deletegoal N
-│   │   ├── coordinator.py             # All coordinator logic:
-│   │   │                              #   AGENT_PERSONAS, ACTION_TO_STATUS, HELP_TEXT
-│   │   │                              #   coordinate_for_user (4 modes)
-│   │   │                              #   _handle_reactive_log, _handle_pattern_check, _handle_win, _handle_checkin
-│   │   │                              #   _pick_exa_flavor (LLM-driven)
-│   │   │                              #   handle_status/confused/plan/addgoal/deletegoal commands
-│   │   │                              #   _parse_and_create_goal, _check_patterns
-│   │   │                              #   _build_telegram_message; _send_telegram(user_id, text) looks up chat_id
-│   │   └── agents/
-│   │       ├── __init__.py
-│   │       ├── base.py                # BaseAgent: get_peer_states(), AgentResult
-│   │       ├── fitness.py
-│   │       ├── sleep.py
-│   │       ├── money.py
-│   │       ├── social.py
-│   │       └── short_lived.py
-│   └── shared/
-│       ├── __init__.py
-│       ├── supabase_client.py         # Supabase: goals, logs, agent_states, interventions, messages;
-│       │                              #   get_or_create_user_by_telegram_chat, get_telegram_chat_id
-│       ├── supermemory_client.py      # Supermemory helpers (SDK v3.27 compatible)
-│       ├── exa_client.py              # Exa REST API: 10 flavors with intro sentences, search_content_varied
-│       └── telegram_client.py         # send_message, send_message_with_buttons, answer_callback_query,
-│                                      #   parse_webhook_update (messages + callback queries)
-├── supabase/
-│   └── migrations/
-│       ├── 001_initial_schema.sql     # All 5 tables
-│       ├── 002_delivery.sql           # ALTER TABLE interventions ADD COLUMN delivered_at (run manually)
-│       ├── 003_state_history.sql      # ALTER TABLE agent_states ADD COLUMN state_history (run manually)
-│       └── 004_telegram_user_mapping.sql  # telegram_user_mapping (chat_id → user_id) for multi-user bot
-└── frontend/
-    ├── .env.local
-    ├── lib/
-    │   ├── supabase.ts                # Supabase client + MOCK_USER_ID
-    │   └── groq.ts                    # Groq fetch wrapper + parseGroqJSON
-    ├── app/
-    │   ├── page.tsx                   # 3-column layout
-    │   └── api/
-    │       ├── goals/route.ts         # POST: Groq classifies description
-    │       ├── logs/route.ts          # POST: Groq routes log + fires reactive tick
-    │       ├── agent-messages/route.ts
-    │       ├── agent-states/route.ts
-    │       └── trigger-tick/route.ts  # POST: proxies to Modal trigger_tick
-    └── components/
-        ├── agent-chat.tsx             # Companion messages + Exa link cards
-        ├── agent-memory.tsx           # Supermemory context per companion
-        ├── activity-log.tsx
-        ├── goal-form.tsx
-        └── ui/
++-- AGENTS.MD                          # This file
++-- backend/
+|   +-- .env                           # Local env (gitignored)
+|   +-- .venv/                         # Python venv
+|   +-- seed_demo.py                   # Seeds demo data (--reset to wipe first)
+|   +-- reset_user.py                  # Wipe user data; --user/--chat/--all
+|   +-- modal_app/
+|   |   +-- __init__.py
+|   |   +-- app.py                     # Modal app: LLM fns, cron (30min + 5min), endpoints,
+|   |   |                              # telegram_webhook with command + callback routing,
+|   |   |                              # scheduled_nudge_tick, _tick_for_user
+|   |   +-- coordinator.py             # Priority engine, coordinate_for_user (4 modes),
+|   |   |                              # handle_list/confused/plan/addgoal/deletegoal commands,
+|   |   |                              # handle_nightly_summary, generate_nudge/logcheck messages,
+|   |   |                              # _parse_and_create_goal, _check_patterns, _build_telegram_message
+|   |   +-- agents/
+|   |       +-- __init__.py
+|   |       +-- base.py                # BaseAgent: get_peer_states() with priority, AgentResult with goal_adjustment
+|   |       +-- dynamic.py             # DynamicAgent: single agent class, builds prompt from goal metadata
+|   +-- shared/
+|       +-- __init__.py
+|       +-- supabase_client.py         # goals (with agent_name/personality/priority), logs, states, interventions,
+|       |                              # update_goal_meta, update_goal_config, telegram_user_mapping
+|       +-- supermemory_client.py      # Supermemory helpers (SDK v3.27 compatible)
+|       +-- exa_client.py             # Exa REST API: 10 flavors (no emojis), search_content_multi(topics)
+|       +-- telegram_client.py         # send_message, send_message_with_buttons, answer_callback_query,
+|                                      # parse_webhook_update
++-- supabase/
+|   +-- migrations/
+|       +-- 001_initial_schema.sql     # All 5 tables
+|       +-- 002_delivery.sql           # ALTER TABLE interventions ADD delivered_at
+|       +-- 003_state_history.sql      # ALTER TABLE agent_states ADD state_history
+|       +-- 004_telegram_user_mapping.sql  # telegram_user_mapping table
+|       +-- 005_dynamic_agents.sql     # ALTER TABLE goals ADD agent_name, personality, priority
++-- frontend/
+    +-- .env.local
+    +-- lib/
+    |   +-- supabase.ts                # Supabase client + MOCK_USER_ID
+    |   +-- groq.ts                    # Groq fetch wrapper + parseGroqJSON
+    +-- app/
+    |   +-- page.tsx                   # 3-column layout
+    |   +-- api/
+    |       +-- goals/route.ts         # POST: Groq classifies description
+    |       +-- logs/route.ts          # POST: Groq routes log + fires reactive tick
+    |       +-- agent-messages/route.ts
+    |       +-- agent-states/route.ts
+    |       +-- trigger-tick/route.ts  # POST: proxies to Modal trigger_tick
+    +-- components/
+        +-- agent-chat.tsx             # Agent messages + Exa link cards
+        +-- agent-memory.tsx           # Supermemory context
+        +-- activity-log.tsx
+        +-- goal-form.tsx
+        +-- ui/
 ```
