@@ -392,6 +392,137 @@ def trigger_tick_for_user(body: dict):
     }
 
 
+VALID_DEMO_ACTIONS = {"nightly_summary", "proactive_nudges", "checkin"}
+
+
+def _run_demo_action_for_user(user_id: str, action: str, db, tg):
+    """Run one demo action for a single user. Returns (ok: bool, result: dict)."""
+    from modal_app.coordinator import (
+        handle_nightly_summary,
+        generate_nudge_message,
+        generate_logcheck_message,
+    )
+
+    chat_id = db.get_telegram_chat_id(user_id)
+    if not chat_id:
+        return False, {"reason": "no Telegram chat"}
+
+    if action == "nightly_summary":
+        result = handle_nightly_summary(user_id, _llm_call_coordinator)
+        if result.get("decision") == "no_action":
+            return False, {"reason": result.get("reason", "No action")}
+        return True, {"message": "Nightly summary sent"}
+
+    if action == "proactive_nudges":
+        goals = db.get_active_goals(user_id=user_id)
+        now = datetime.now(timezone.utc)
+        active_goals = []
+        for g in goals:
+            if g.get("end_at"):
+                end_at = datetime.fromisoformat(g["end_at"]).replace(tzinfo=timezone.utc)
+                if end_at < now:
+                    continue
+            active_goals.append(g)
+        nudge_count = 0
+        logcheck_count = 0
+        for goal in active_goals:
+            config = goal.get("config") or {}
+            if config.get("nudge_schedule"):
+                try:
+                    msg = generate_nudge_message(goal, user_id, _llm_call_coordinator)
+                    if tg.send_message(chat_id, msg):
+                        nudge_count += 1
+                except Exception as e:
+                    print(f"[trigger_demo] nudge error goal {goal['id'][:8]}: {e}")
+            if config.get("logcheck_schedule"):
+                try:
+                    today_logs = db.get_recent_logs(user_id, goal_id=goal["id"], days=1)
+                    if not today_logs:
+                        msg = generate_logcheck_message(goal)
+                        if tg.send_message(chat_id, msg):
+                            logcheck_count += 1
+                except Exception as e:
+                    print(f"[trigger_demo] logcheck error goal {goal['id'][:8]}: {e}")
+        return True, {"nudge_count": nudge_count, "logcheck_count": logcheck_count}
+
+    if action == "checkin":
+        goals = db.get_active_goals(user_id=user_id)
+        now = datetime.now(timezone.utc)
+        active_goals = []
+        for g in goals:
+            if g.get("end_at"):
+                end_at = datetime.fromisoformat(g["end_at"]).replace(tzinfo=timezone.utc)
+                if end_at < now:
+                    db.deactivate_goal(g["id"])
+                    continue
+            active_goals.append(g)
+        if not active_goals:
+            return False, {"reason": "No active goals"}
+        list(run_agent_for_goal.map(active_goals))
+        run_coordinator.remote(user_id, "checkin")
+        return True, {"message": "Check-in sent"}
+
+    return False, {"reason": "Unknown action"}
+
+
+@app.function(image=agent_image, secrets=secrets, timeout=300)
+@modal.fastapi_endpoint(method="POST", docs=True)
+def trigger_demo_action(body: dict):
+    """Demo: trigger nightly summary, proactive nudges, or check-in. Send to one user or all (send_to_all=True)."""
+    sys.path.insert(0, "/root")
+    from shared import supabase_client as db
+    from shared import telegram_client as tg
+    from modal_app.coordinator import (
+        handle_nightly_summary,
+        generate_nudge_message,
+        generate_logcheck_message,
+    )
+
+    action = body.get("action")
+    if not action or action not in VALID_DEMO_ACTIONS:
+        return {
+            "status": "error",
+            "message": f"action must be one of: {', '.join(sorted(VALID_DEMO_ACTIONS))}",
+        }
+
+    send_to_all = body.get("send_to_all", False)
+    if send_to_all:
+        user_ids = db.get_all_telegram_user_ids()
+        if not user_ids:
+            return {"status": "ok", "users_processed": 0, "message": "No users with Telegram linked"}
+        ok_count = 0
+        total_nudge = 0
+        total_logcheck = 0
+        for uid in user_ids:
+            try:
+                ok, result = _run_demo_action_for_user(uid, action, db, tg)
+                if ok:
+                    ok_count += 1
+                    total_nudge += result.get("nudge_count", 0)
+                    total_logcheck += result.get("logcheck_count", 0)
+            except Exception as e:
+                print(f"[trigger_demo] error for user {uid[:8]}: {e}")
+        return {
+            "status": "ok",
+            "users_processed": ok_count,
+            "users_total": len(user_ids),
+            "nudge_count": total_nudge,
+            "logcheck_count": total_logcheck,
+            "message": f"Sent to {ok_count}/{len(user_ids)} users",
+        }
+
+    user_id = body.get("user_id")
+    if not user_id:
+        return {"status": "error", "message": "user_id required (or set send_to_all: true)"}
+    try:
+        ok, result = _run_demo_action_for_user(user_id, action, db, tg)
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
+    if not ok:
+        return {"status": "skipped", "message": result.get("reason", "No action")}
+    return {"status": "ok", **result}
+
+
 @app.function(image=agent_image, secrets=secrets, timeout=60)
 @modal.fastapi_endpoint(method="POST", docs=True)
 def telegram_webhook(body: dict):
@@ -442,22 +573,22 @@ def telegram_webhook(body: dict):
                     db.update_log_goal(log_id, goal_id)
                     goal_info = next((g for g in active_goals if g["id"] == goal_id), None)
                     goal_name = goal_info["name"] if goal_info else "that goal"
-                    send_message(chat_id, f"*hackbitz*\n\nGot it -- logged under _{goal_name}_.")
+                    send_message(chat_id, f"⚡ *hackbitz*\n\nGot it — logged under _{goal_name}_. ✅")
                     _tick_for_user.spawn(user_id, "reactive_log", goal_id)
                 else:
-                    send_message(chat_id, "*hackbitz*\n\nGot it, noted.")
+                    send_message(chat_id, "⚡ *hackbitz*\n\nGot it, noted. ✅")
             return {"status": "ok", "callback": "confirm"}
 
         # classify:skip:<log_id>
         if data.startswith("cls:s:"):
-            send_message(chat_id, "*hackbitz*\n\nSaved without linking to a goal.")
+            send_message(chat_id, "⚡ *hackbitz*\n\nSaved without linking to a goal. 📌")
             return {"status": "ok", "callback": "skip"}
 
         # classify:new:<log_id>
         if data.startswith("cls:n:"):
             send_message(
                 chat_id,
-                "*hackbitz*\n\nSend me `/addgoal <description>` to create a new goal for this.",
+                "⚡ *hackbitz*\n\nSend me `/addgoal <description>` to create a new goal for this. 🌱",
             )
             return {"status": "ok", "callback": "new"}
 
@@ -466,13 +597,13 @@ def telegram_webhook(body: dict):
             _wipe_user_data(user_id)
             send_message(
                 chat_id,
-                "*hackbitz*\n\nDone -- everything has been wiped. You're starting fresh.\n\n"
+                "⚡ *hackbitz*\n\nDone — everything has been wiped. You're starting fresh. 🌱\n\n"
                 "Use /addgoal to set up your first goal.",
             )
             return {"status": "ok", "callback": "reset_confirm"}
 
         if data == "reset:cancel":
-            send_message(chat_id, "*hackbitz*\n\nCancelled. Your data is safe.")
+            send_message(chat_id, "⚡ *hackbitz*\n\nCancelled. Your data is safe. ✅")
             return {"status": "ok", "callback": "reset_cancel"}
 
         # addgoal:exp:<goal_id>:<new|failed> -- experience questionnaire
@@ -485,7 +616,7 @@ def telegram_webhook(body: dict):
                     db.update_goal_meta(goal_id, {"personality": "strict", "priority": "high"})
                     send_message_with_buttons(
                         chat_id,
-                        "*hackbitz*\n\nUnderstood -- I'll be direct with you on this one.\nWhen should I nudge you about this?",
+                        "⚡ *hackbitz*\n\nUnderstood — I'll be direct with you on this one. 💪\nWhen should I nudge you about this?",
                         [
                             [
                                 {"text": "Every morning 9am", "callback_data": f"addgoal:nudge:{goal_id}:9am"},
@@ -498,7 +629,7 @@ def telegram_webhook(body: dict):
                     db.update_goal_meta(goal_id, {"personality": "warm", "priority": "normal"})
                     send_message_with_buttons(
                         chat_id,
-                        "*hackbitz*\n\nGot it -- I'll keep things encouraging.\nWhen should I nudge you about this?",
+                        "⚡ *hackbitz*\n\nGot it — I'll keep things encouraging. 🌟\nWhen should I nudge you about this?",
                         [
                             [
                                 {"text": "Every morning 9am", "callback_data": f"addgoal:nudge:{goal_id}:9am"},
@@ -517,7 +648,7 @@ def telegram_webhook(body: dict):
                 time_choice = parts[3]
                 cron_map = {"9am": "0 9 * * *", "7pm": "0 19 * * *"}
                 if time_choice == "custom":
-                    send_message(chat_id, "*hackbitz*\n\nTell me when you want the nudge (e.g. 'daily 8am', 'every morning 6am').")
+                    send_message(chat_id, "⚡ *hackbitz*\n\nTell me when you want the nudge (e.g. 'daily 8am', 'every morning 6am'). ⏰")
                     return {"status": "ok", "callback": "addgoal_nudge_custom"}
                 cron_expr = cron_map.get(time_choice, "0 9 * * *")
                 goals = db.get_active_goals(user_id=user_id)
@@ -528,7 +659,7 @@ def telegram_webhook(body: dict):
                     db.update_goal_config(goal_id, config)
                 send_message_with_buttons(
                     chat_id,
-                    "*hackbitz*\n\nAnd when should I check if you logged progress?",
+                    "⚡ *hackbitz*\n\nAnd when should I check if you logged progress? 📋",
                     [
                         [
                             {"text": "Daily 10pm", "callback_data": f"addgoal:logcheck:{goal_id}:10pm"},
@@ -547,7 +678,7 @@ def telegram_webhook(body: dict):
                 time_choice = parts[3]
                 cron_map = {"10pm": "0 22 * * *", "8pm": "0 20 * * *"}
                 if time_choice == "custom":
-                    send_message(chat_id, "*hackbitz*\n\nTell me when you want the log check (e.g. 'daily 10pm', 'every evening 9pm').")
+                    send_message(chat_id, "⚡ *hackbitz*\n\nTell me when you want the log check (e.g. 'daily 10pm', 'every evening 9pm'). ⏰")
                     return {"status": "ok", "callback": "addgoal_logcheck_custom"}
                 cron_expr = cron_map.get(time_choice, "0 22 * * *")
                 goals = db.get_active_goals(user_id=user_id)
@@ -571,7 +702,7 @@ def telegram_webhook(body: dict):
                 closing = "No going easy on you." if personality == "strict" else "I've got your back."
                 send_message(
                     chat_id,
-                    f"*hackbitz*\n\nAll set! {agent_name} will remind you at {nudge_label} and check in at {time_choice}.\n{closing}",
+                    f"⚡ *hackbitz*\n\nAll set! {agent_name} will remind you at {nudge_label} and check in at {time_choice}. ✅\n{closing}",
                 )
             return {"status": "ok", "callback": "addgoal_logcheck"}
 
@@ -592,14 +723,23 @@ def telegram_webhook(body: dict):
                         config.update(new_config)
                         db.update_goal_config(goal_id, config)
                         agent_name = goal.get("agent_name", "Goal")
-                        send_message(chat_id, f"*{agent_name}*\n\nDone -- goal adjusted. Let's see how this goes.")
+                        send_message(chat_id, f"*{agent_name}*\n\nDone — goal adjusted. Let's see how this goes. 📐✨")
                         return {"status": "ok", "callback": "adjust_yes"}
-            send_message(chat_id, "*hackbitz*\n\nAdjusted.")
+            send_message(chat_id, "⚡ *hackbitz*\n\nAdjusted. ✅")
             return {"status": "ok", "callback": "adjust_yes"}
 
         if data.startswith("adjust:no:"):
-            send_message(chat_id, "*hackbitz*\n\nGot it -- keeping the goal as is.")
+            send_message(chat_id, "⚡ *hackbitz*\n\nGot it — keeping the goal as is. 👍")
             return {"status": "ok", "callback": "adjust_no"}
+
+        # personality:roasting | personality:playful | personality:gentle
+        if data.startswith("personality:"):
+            personality = data.split(":", 1)[1]
+            if personality in ("roasting", "playful", "gentle"):
+                db.update_user_personality(user_id, personality)
+                labels = {"roasting": "Roasting 😤", "playful": "Playful 😄", "gentle": "Gentle 💙"}
+                send_message(chat_id, f"⚡ *hackbitz*\n\nDone. I'll talk to you in {labels[personality]} mode from now on. ✨")
+            return {"status": "ok", "callback": "personality"}
 
         return {"status": "ignored", "reason": "unknown callback"}
 
@@ -609,10 +749,30 @@ def telegram_webhook(body: dict):
     if is_new:
         send_message(
             chat_id,
-            "*hackbitz*\n\nHi, I'm hackbitz. Use /addgoal to add a goal, /help for commands.",
+            "⚡ *hackbitz*\n\nHi, I'm hackbitz. Use /addgoal to add a goal, /help for commands. 👋",
         )
 
     # --- Command routing ---
+    if text == "/personality":
+        current = db.get_user_personality(user_id)
+        labels = {"roasting": "Roasting 😤", "playful": "Playful 😄", "gentle": "Gentle 💙"}
+        send_message_with_buttons(
+            chat_id,
+            "⚡ *hackbitz*\n\nPick how I should talk to you:\n\n"
+            "• **Roasting** — sarcastic tough love, no sugarcoating\n"
+            "• **Playful** — fun, light, jokes and warmth\n"
+            "• **Gentle** — warm, kind, no pressure\n\n"
+            f"(Current: {labels.get(current, current)})",
+            [
+                [
+                    {"text": "Roasting 😤", "callback_data": "personality:roasting"},
+                    {"text": "Playful 😄", "callback_data": "personality:playful"},
+                    {"text": "Gentle 💙", "callback_data": "personality:gentle"},
+                ],
+            ],
+        )
+        return {"status": "ok", "command": "/personality"}
+
     if text == "/list":
         response_text = handle_list_command(user_id)
         send_message(chat_id, response_text)
@@ -633,7 +793,7 @@ def telegram_webhook(body: dict):
         return {"status": "ok", "command": "/help"}
 
     if text == "/checkin":
-        send_message(chat_id, "*hackbitz*\n\nOn it -- checking in on everything right now. Give me a minute.")
+        send_message(chat_id, "⚡ *hackbitz*\n\nOn it — checking in on everything right now. Give me a minute. ⏳")
         _tick_for_user.spawn(user_id, "checkin")
         return {"status": "ok", "command": "/checkin"}
 
@@ -648,7 +808,7 @@ def telegram_webhook(body: dict):
             number = int(arg)
             response_text = handle_deletegoal_number_command(user_id, number)
         except ValueError:
-            response_text = "*hackbitz*\n\nUse `/deletegoal` to see your goals, then `/deletegoal <number>` to remove one."
+            response_text = "⚡ *hackbitz*\n\nUse `/deletegoal` to see your goals, then `/deletegoal <number>` to remove one. 📋"
         send_message(chat_id, response_text)
         return {"status": "ok", "command": "/deletegoal"}
 
@@ -665,7 +825,7 @@ def telegram_webhook(body: dict):
         has_deadline = goal.get("priority") == "critical"
 
         confirm_msg = (
-            f"*hackbitz*\n\nGot it -- I've added \"{goal_name}\".\n"
+            f"⚡ *hackbitz*\n\nGot it — I've added \"{goal_name}\". 🌱\n"
             f"Everything related to this will be tracked by *{agent_name}*."
         )
 
@@ -697,7 +857,7 @@ def telegram_webhook(body: dict):
     if text == "/reset":
         send_message_with_buttons(
             chat_id,
-            "*hackbitz*\n\nThis will delete all your goals, logs, and history. Are you sure?",
+            "⚡ *hackbitz*\n\nThis will delete all your goals, logs, and history. Are you sure? ⚠️",
             [[
                 {"text": "Yes, wipe everything", "callback_data": "reset:confirm"},
                 {"text": "Cancel", "callback_data": "reset:cancel"},
@@ -792,7 +952,7 @@ def telegram_webhook(body: dict):
         ]
         send_message_with_buttons(
             chat_id,
-            f"*hackbitz*\n\nThis sounds like it could be part of _{goal_name}_. Should I log it there?",
+            f"⚡ *hackbitz*\n\nThis sounds like it could be part of _{goal_name}_. Should I log it there? 🤔",
             buttons,
         )
     else:
@@ -802,7 +962,7 @@ def telegram_webhook(body: dict):
         ]
         send_message_with_buttons(
             chat_id,
-            "*hackbitz*\n\nI'm not sure which goal this belongs to. Want to create a new goal for it, or just save it as a general note?",
+            "⚡ *hackbitz*\n\nI'm not sure which goal this belongs to. Want to create a new goal for it, or just save it as a general note? 📝",
             buttons,
         )
     return {"status": "ok", "goal_id": None, "pending_confirmation": True}

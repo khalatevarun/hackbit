@@ -427,6 +427,7 @@ reset:cancel                       -> cancel wipe
 | `scheduled_nudge_tick()` | Cron (*/5) | 300s | Per-goal nudge/logcheck + nightly summary |
 | `trigger_tick()` | POST endpoint | 300s | Manual trigger for all users |
 | `trigger_tick_for_user(body)` | POST endpoint | 300s | Per-user reactive trigger |
+| `trigger_demo_action(body)` | POST endpoint | 300s | Demo: nightly_summary, proactive_nudges, checkin (sends to Telegram) |
 | `telegram_webhook(body)` | POST endpoint | 60s | Commands, text logs, callbacks |
 | `_tick_for_user(user_id, mode, ...)` | Modal fn | 300s | Internal: agents + coordinator |
 
@@ -567,6 +568,7 @@ NEXT_PUBLIC_SUPABASE_URL=...
 NEXT_PUBLIC_SUPABASE_ANON_KEY=...
 MODAL_TRIGGER_URL=https://khalatevarun--lifeos-agents-trigger-tick.modal.run
 MODAL_TRIGGER_URL_FOR_USER=https://khalatevarun--lifeos-agents-trigger-tick-for-user.modal.run
+MODAL_TRIGGER_DEMO_URL=https://khalatevarun--lifeos-agents-trigger-demo-action.modal.run
 GROQ_API_KEY=...
 ```
 
@@ -625,6 +627,7 @@ lifeos/
     |       +-- agent-messages/route.ts
     |       +-- agent-states/route.ts
     |       +-- trigger-tick/route.ts  # POST: proxies to Modal trigger_tick
+    |       +-- trigger-demo/route.ts  # POST: proxies to Modal trigger_demo_action (nightly summary, nudges, check-in)
     +-- components/
         +-- agent-chat.tsx             # Agent messages + Exa link cards
         +-- agent-memory.tsx           # Supermemory context

@@ -39,18 +39,49 @@ def _get_agent_name(goal_info: dict) -> str:
     return goal_info.get("agent_name") or goal_info.get("name", "Goal")
 
 
+# ---------------------------------------------------------------------------
+# Chat personality (user preference: roasting | playful | gentle)
+# ---------------------------------------------------------------------------
+
+CHAT_PERSONALITY_PROMPTS = {
+    "roasting": (
+        "The user has chosen ROASTING mode. Your tone MUST be: sarcastic tough love, call out excuses with dry humor. "
+        "Never actually cruel — still on their side — but zero sugarcoating. Short, punchy sentences. "
+        "Sound like a friend who teases them for slacking. Use 1-2 emojis (e.g. 😤 🙄 🔥 💀). "
+        "'You're better than this' energy. No fluffy encouragement."
+    ),
+    "playful": (
+        "The user has chosen PLAYFUL mode. Your tone MUST be: fun, light, encouraging with jokes and warmth. "
+        "Puns and casual language welcome. Use emojis freely (2-4 per message) to keep it lively. "
+        "Like a supportive friend who makes them smile. Keep it concise but upbeat."
+    ),
+    "gentle": (
+        "The user has chosen GENTLE mode. Your tone MUST be: warm, kind, supportive, no pressure. "
+        "Soft encouragement. Use 1-3 gentle emojis (e.g. 💙 🌟 ✨ 💪). "
+        "Like a caring coach. Never harsh or sarcastic."
+    ),
+}
+
+
+def _get_chat_personality_instruction(user_id: str) -> str:
+    """Return the system-prompt fragment for the user's chosen chat personality."""
+    p = db.get_user_personality(user_id)
+    return CHAT_PERSONALITY_PROMPTS.get(p, CHAT_PERSONALITY_PROMPTS["gentle"])
+
+
 HELP_TEXT = (
-    "*hackbitz*\n\n"
+    "⚡ *hackbitz*\n\n"
     "Here's what I can do:\n\n"
-    "- Just tell me anything -- how you slept, if you worked out, what you spent. I'll keep track.\n"
-    "- /list -- See all your active goals and their status.\n"
-    "- /confused -- I'll name the ONE thing that matters most right now.\n"
-    "- /plan -- Today's top priorities given what's going on.\n"
-    "- /checkin -- Full fresh analysis of everything. Takes about 60s.\n"
-    "- /addgoal <description> -- Add a new goal in plain language.\n"
-    "- /deletegoal -- List your goals to remove one.\n"
-    "- /reset -- Wipe all your data and start fresh.\n"
-    "- /help -- This message.\n\n"
+    "- Just tell me anything — how you slept, if you worked out, what you spent. I'll keep track.\n"
+    "- /list — See all your active goals and their status.\n"
+    "- /confused — I'll name the ONE thing that matters most right now.\n"
+    "- /plan — Today's top priorities given what's going on.\n"
+    "- /checkin — Full fresh analysis of everything. Takes about 60s.\n"
+    "- /addgoal <description> — Add a new goal in plain language.\n"
+    "- /deletegoal — List your goals to remove one.\n"
+    "- /personality — Set my tone: roasting, playful, or gentle.\n"
+    "- /reset — Wipe all your data and start fresh.\n"
+    "- /help — This message.\n\n"
     "I'll reach out when something needs your attention. Otherwise, I stay quiet."
 )
 
@@ -202,13 +233,13 @@ def handle_list_command(user_id: str) -> str:
     """Build /list response -- no LLM needed."""
     goals = db.get_active_goals(user_id=user_id)
     if not goals:
-        return "*hackbitz*\n\nNo active goals. Add some with /addgoal."
+        return "⚡ *hackbitz*\n\nNo active goals. Add some with /addgoal. 🌱"
 
     agent_states = db.get_agent_states_for_user(user_id)
     state_map = {s["goal_id"]: s for s in agent_states}
 
     goals_sorted = sorted(goals, key=lambda g: g.get("created_at", ""))
-    lines = ["*hackbitz*\n", "Your goals:\n"]
+    lines = ["⚡ *hackbitz*\n", "📋 Your goals:\n"]
     for i, g in enumerate(goals_sorted, 1):
         agent_name = g.get("agent_name", "Goal")
         goal_name = g.get("name", "")
@@ -232,13 +263,12 @@ def handle_confused_command(user_id: str, llm_fn: Callable[..., str]) -> str:
     """Build /confused response: ONE thing to focus on right now."""
     agent_states = db.get_agent_states_for_user(user_id)
     states_summary = _build_states_summary(_sort_by_priority(agent_states))
-
+    confused_personality = _get_chat_personality_instruction(user_id)
     system_prompt = (
-        "You are hackbitz -- you look across everything happening in a person's life. "
-        "Speak directly to them like a decisive helpful friend. "
-        "Be decisive. Name ONE thing to focus on right now and explain why briefly. "
+        "You are hackbitz — you look across everything happening in a person's life. "
+        "Speak directly to them. Be decisive. Name ONE thing to focus on right now and explain why briefly. "
         "3-4 sentences max. Never say 'the user', 'companion', or 'agent'. "
-        "Do not include any emojis."
+        f"{confused_personality}"
     )
     user_prompt = (
         f"Current goal states:\n{states_summary}\n\n"
@@ -252,21 +282,20 @@ def handle_confused_command(user_id: str, llm_fn: Callable[..., str]) -> str:
         ],
         0.5,
     )
-    return _build_telegram_message("*hackbitz*", body)
+    return _build_telegram_message("⚡ *hackbitz* 🎯", body)
 
 
 def handle_plan_command(user_id: str, llm_fn: Callable[..., str]) -> str:
     """Build /plan response: today's top 3 priorities."""
     agent_states = db.get_agent_states_for_user(user_id)
     states_summary = _build_states_summary(_sort_by_priority(agent_states))
-
+    plan_personality = _get_chat_personality_instruction(user_id)
     system_prompt = (
         "You are hackbitz. "
-        "Speak directly to them like a decisive helpful friend. "
-        "Give an ordered list of today's top 3 priorities given what you know. "
+        "Speak directly to them. Give an ordered list of today's top 3 priorities given what you know. "
         "Be specific and realistic. Max 3 items. "
         "Never say 'the user', 'companion', or 'agent'. "
-        "Do not include any emojis."
+        f"{plan_personality}"
     )
     user_prompt = (
         f"Current goal states:\n{states_summary}\n\nList today's top 3 priorities."
@@ -279,7 +308,7 @@ def handle_plan_command(user_id: str, llm_fn: Callable[..., str]) -> str:
         ],
         0.5,
     )
-    return _build_telegram_message("*hackbitz*", body)
+    return _build_telegram_message("⚡ *hackbitz* 📌", body)
 
 
 def _parse_and_create_goal(description: str, user_id: str, llm_fn: Callable[..., str]) -> dict:
@@ -363,12 +392,12 @@ def handle_deletegoal_list_command(user_id: str) -> str:
     """Handle /deletegoal (no args) -- list active goals numbered."""
     goals = db.get_active_goals(user_id=user_id)
     if not goals:
-        return "*hackbitz*\n\nYou don't have any active goals right now."
+        return "⚡ *hackbitz*\n\nYou don't have any active goals right now. 📋"
 
     goals_sorted = sorted(goals, key=lambda g: g.get("created_at", ""))
     lines = [
-        "*hackbitz*\n",
-        "Here are your active goals. Reply with /deletegoal <number> to remove one:\n",
+        "⚡ *hackbitz*\n",
+        "📋 Here are your active goals. Reply with /deletegoal <number> to remove one:\n",
     ]
     for i, g in enumerate(goals_sorted, 1):
         agent_name = g.get("agent_name", "Goal")
@@ -380,19 +409,19 @@ def handle_deletegoal_number_command(user_id: str, number: int) -> str:
     """Handle /deletegoal <number> -- deactivate goal by list position."""
     goals = db.get_active_goals(user_id=user_id)
     if not goals:
-        return "*hackbitz*\n\nYou don't have any active goals right now."
+        return "⚡ *hackbitz*\n\nYou don't have any active goals right now. 📋"
 
     goals_sorted = sorted(goals, key=lambda g: g.get("created_at", ""))
     if number < 1 or number > len(goals_sorted):
         return (
-            f"*hackbitz*\n\n"
-            f"I don't see a goal with that number. You have {len(goals_sorted)} active goal(s)."
+            f"⚡ *hackbitz*\n\n"
+            f"I don't see a goal with that number. You have {len(goals_sorted)} active goal(s). 🤔"
         )
 
     goal = goals_sorted[number - 1]
     db.deactivate_goal(goal["id"])
     agent_name = goal.get("agent_name", "Goal")
-    return f"*hackbitz*\n\nRemoved: {agent_name} -- {goal['name']}. I'll stop tracking this."
+    return f"⚡ *hackbitz*\n\nRemoved: {agent_name} — {goal['name']}. I'll stop tracking this. ✅"
 
 
 # ---------------------------------------------------------------------------
@@ -451,9 +480,9 @@ def _handle_reactive_log(
 
     if not matched_state:
         if goal_name_for_ack:
-            _send_telegram(user_id, f"*hackbitz*\n\nGot it -- logged under _{goal_name_for_ack}_. I'll factor this in.")
+            _send_telegram(user_id, f"⚡ *hackbitz*\n\nGot it — logged under _{goal_name_for_ack}_. I'll factor this in. 👍")
         else:
-            _send_telegram(user_id, "*hackbitz*\n\nGot it, noted.")
+            _send_telegram(user_id, "⚡ *hackbitz*\n\nGot it, noted. 📝")
         return {"decision": "ack", "reason": "no agent state yet -- sent ack"}
 
     state = matched_state.get("state", {})
@@ -465,35 +494,36 @@ def _handle_reactive_log(
     personality = goal_info.get("personality", "warm")
 
     if next_action == "monitor":
-        _send_telegram(user_id, f"*{agent_name}*\n\nGot it, logged. You're on track with _{goal_name}_ -- keep it up.")
+        _send_telegram(user_id, f"*{agent_name}*\n\nGot it, logged. You're on track with _{goal_name}_ — keep it up. ✨")
         return {"decision": "ack", "reason": "agent monitoring -- sent brief ack"}
 
     recent = db.get_recent_interventions(user_id, goal_id=source_goal_id, hours=6)
     if recent:
-        _send_telegram(user_id, f"*hackbitz*\n\nLogged under _{goal_name}_.")
+        _send_telegram(user_id, f"⚡ *hackbitz*\n\nLogged under _{goal_name}_. 📌")
         return {"decision": "ack", "reason": "dedup -- sent brief ack"}
 
     header = f"*{agent_name}*"
 
     if next_action in ("nudge", "call"):
-        length_instruction = "Write 1-2 warm sentences. Start from what they said."
+        length_instruction = "Write 1-2 sentences. Start from what they said."
     else:
-        length_instruction = "Write a brief paragraph (3-4 sentences max). Be warm but direct."
+        length_instruction = "Write a brief paragraph (3-4 sentences max)."
 
-    personality_instruction = (
+    goal_personality_instruction = (
         "Be strict and direct. No sugarcoating."
         if personality == "strict"
         else "Be warm and encouraging."
     )
+    chat_personality = _get_chat_personality_instruction(user_id)
 
     system_prompt = (
         f"You are {agent_name}. "
         "Speak directly to the user like a helpful friend. "
-        f"{personality_instruction} "
+        f"{goal_personality_instruction} "
+        f"{chat_personality} "
         "Address them as 'you'. "
         "Never say 'the user', 'companion', or 'agent'. "
         "Never start your message with a label or heading. "
-        "Do not include any emojis. "
         f"{length_instruction}"
     )
     user_prompt = (
@@ -554,10 +584,10 @@ def _handle_pattern_check(user_id: str, llm_fn: Callable[..., str]) -> dict:
             chat_id = db.get_telegram_chat_id(user_id)
             if chat_id and suggestion:
                 direction = adjustment.get("direction", "easier")
-                text = f"*{agent_name}*\n\n{suggestion}"
+                text = f"*{agent_name}* 📐\n\n{suggestion}"
                 buttons = [
                     [
-                        {"text": f"Yes, adjust", "callback_data": f"adjust:yes:{goal_id}"},
+                        {"text": "✅ Yes, adjust", "callback_data": f"adjust:yes:{goal_id}"},
                         {"text": "Keep as is", "callback_data": f"adjust:no:{goal_id}"},
                     ]
                 ]
@@ -567,14 +597,14 @@ def _handle_pattern_check(user_id: str, llm_fn: Callable[..., str]) -> dict:
     patterns = result.get("patterns", [])
     wins = result.get("wins", [])
 
+    chat_personality = _get_chat_personality_instruction(user_id)
     for win in wins:
         agent_name = win["agent_name"]
         system_prompt = (
             f"You are {agent_name}. "
-            "Speak directly to them like a warm, encouraging friend. "
-            "1 warm sentence celebrating a win. "
+            "Speak directly to them. 1 sentence celebrating a win. "
             "Never say 'the user', 'companion', or 'agent'. "
-            "Do not include any emojis."
+            f"{chat_personality}"
         )
         body = llm_fn(
             [
@@ -605,13 +635,13 @@ def _handle_pattern_check(user_id: str, llm_fn: Callable[..., str]) -> dict:
             for p in patterns_sorted
         )
 
+        multi_personality = _get_chat_personality_instruction(user_id)
         system_prompt = (
-            "You are hackbitz -- you look across everything happening in a person's life. "
-            "Speak directly to them like a decisive helpful friend. "
-            "Be decisive. Name ONE thing to focus on. "
-            "Say explicitly that the others can wait. "
-            "3-4 sentences max. Never say 'the user', 'companion', or 'agent'. "
-            "Do not include any emojis."
+            "You are hackbitz — you look across everything happening in a person's life. "
+            "Speak directly to them. Be decisive. Name ONE thing to focus on. "
+            "Say explicitly that the others can wait. 3-4 sentences max. "
+            "Never say 'the user', 'companion', or 'agent'. "
+            f"{multi_personality}"
         )
         user_prompt = (
             f"Multiple areas need attention:\n{patterns_summary}\n\n"
@@ -635,7 +665,7 @@ def _handle_pattern_check(user_id: str, llm_fn: Callable[..., str]) -> dict:
                 break
         topics = _get_exa_topics(primary_goal_info) if primary_goal_info else ["wellness"]
         exa_results = exa_client.search_content_multi(topics, count=3)
-        telegram_text = _build_telegram_message("*hackbitz*", body, exa_results or None)
+        telegram_text = _build_telegram_message("⚡ *hackbitz*", body, exa_results or None)
         intervention_id = _log_intervention(
             user_id,
             "pattern_multi",
@@ -650,13 +680,12 @@ def _handle_pattern_check(user_id: str, llm_fn: Callable[..., str]) -> dict:
         agent_name = pattern["agent_name"]
         severity = pattern["severity"]
         context_summary = pattern.get("context_summary", "")
-
+        single_personality = _get_chat_personality_instruction(user_id)
         system_prompt = (
             f"You are {agent_name}. "
-            "Speak directly to them like a helpful friend. "
-            "2-3 direct, warm sentences. No labels, no hedging. "
+            "Speak directly to them. 2-3 direct sentences. No labels, no hedging. "
             "Never say 'the user', 'companion', or 'agent'. "
-            "Do not include any emojis."
+            f"{single_personality}"
         )
         user_prompt = (
             f"Pattern detected: {severity} for 3+ consecutive checks.\n"
@@ -709,23 +738,22 @@ def _handle_win(
 
     goal_info = matched.get("goals") or {}
     agent_name = _get_agent_name(goal_info)
-
+    win_personality = _get_chat_personality_instruction(user_id)
     system_prompt = (
         f"You are {agent_name}. "
-        "Speak directly to them like a warm, encouraging friend. "
-        "1 warm sentence celebrating a win. "
+        "Speak directly to them. 1 sentence celebrating a win. "
         "Never say 'the user', 'companion', or 'agent'. "
-        "Do not include any emojis."
+        f"{win_personality}"
     )
     body = llm_fn(
         [
             {"role": "system", "content": system_prompt},
-            {"role": "user", "content": f"The {agent_name} goal just bounced back after a rough patch. Celebrate warmly in one sentence."},
+            {"role": "user", "content": f"The {agent_name} goal just bounced back after a rough patch. Celebrate in one sentence."},
         ],
         0.8,
     )
 
-    _send_telegram(user_id, _build_telegram_message(f"*{agent_name}*", body))
+    _send_telegram(user_id, _build_telegram_message(f"*{agent_name}* 🎉", body))
     return {"decision": "win", "agent_name": agent_name}
 
 
@@ -735,7 +763,7 @@ def _handle_checkin(user_id: str, llm_fn: Callable[..., str]) -> dict:
 
     agent_states = db.get_agent_states_for_user(user_id)
     if not agent_states:
-        _send_telegram(user_id, "*hackbitz*\n\nNo active goals found. Add some with /addgoal to get started.")
+        _send_telegram(user_id, "⚡ *hackbitz*\n\nNo active goals found. Add some with /addgoal to get started. 🌱")
         return {"decision": "checkin", "goals": 0}
 
     sorted_states = _sort_by_priority(agent_states)
@@ -751,8 +779,10 @@ def _handle_checkin(user_id: str, llm_fn: Callable[..., str]) -> dict:
         log_dates = [l.get("created_at", "")[:10] for l in goal_logs]
         log_summary.append(f"- {_get_agent_name(goal_info)}: {len(goal_logs)} logs in 14 days, dates: {log_dates[:10]}")
 
+    checkin_personality = _get_chat_personality_instruction(user_id)
     system_prompt = (
-        "You are hackbitz. Return ONLY valid JSON. Do not include any emojis.\n"
+        "You are hackbitz. Return ONLY valid JSON.\n"
+        f"Tone for one_liner and top_priority: {checkin_personality}\n"
         "Analyze the goal states and logs and return:\n"
         "{\n"
         '  "goals": [\n'
@@ -785,7 +815,7 @@ def _handle_checkin(user_id: str, llm_fn: Callable[..., str]) -> dict:
     try:
         checkin_data = _extract_json(raw)
     except (json.JSONDecodeError, ValueError):
-        _send_telegram(user_id, _build_telegram_message("*hackbitz*", raw))
+        _send_telegram(user_id, _build_telegram_message("⚡ *hackbitz*", raw))
         return {"decision": "checkin", "goals": len(agent_states)}
 
     goals_data = checkin_data.get("goals", [])
@@ -794,29 +824,29 @@ def _handle_checkin(user_id: str, llm_fn: Callable[..., str]) -> dict:
     going_well = [g for g in goals_data if g.get("status") == "on_track"]
     needs_attention = [g for g in goals_data if g.get("status") in ("watch", "off_track")]
 
-    lines = ["*hackbitz -- Check-in*\n"]
+    lines = ["⚡ *hackbitz — Check-in*\n"]
 
     if going_well:
-        lines.append("Going well:")
+        lines.append("✅ Going well:")
         for g in going_well:
-            lines.append(f"- {g['name']} -- {g.get('one_liner', '')}")
+            lines.append(f"  • {g['name']} — {g.get('one_liner', '')}")
         lines.append("")
 
     if needs_attention:
-        lines.append("Needs attention:")
+        lines.append("⚠️ Needs attention:")
         for g in needs_attention:
-            lines.append(f"- {g['name']} -- {g.get('one_liner', '')}")
+            lines.append(f"  • {g['name']} — {g.get('one_liner', '')}")
         lines.append("")
 
     streaks = [g for g in goals_data if g.get("streak_label")]
     if streaks:
-        lines.append("Streaks:")
+        lines.append("🔥 Streaks:")
         for g in streaks:
-            lines.append(f"- {g['name']}: {g['streak_label']}")
+            lines.append(f"  • {g['name']}: {g['streak_label']}")
         lines.append("")
 
     if top_priority:
-        lines.append(f"hackbitz says:\n{top_priority}")
+        lines.append(f"💡 hackbitz says:\n{top_priority}")
 
     msg = "\n".join(lines)
 
@@ -866,6 +896,7 @@ def handle_nightly_summary(user_id: str, llm_fn: Callable[..., str]) -> dict:
         count = log_by_goal.get(s["goal_id"], 0)
         activity_summary.append(f"- {agent_name} (priority={priority}): {count} logs today")
 
+    nightly_personality = _get_chat_personality_instruction(user_id)
     system_prompt = (
         "You are hackbitz. Write an evening wrap-up message. "
         "Speak directly to the user. Be concise and honest. "
@@ -874,7 +905,7 @@ def handle_nightly_summary(user_id: str, llm_fn: Callable[..., str]) -> dict:
         "If a normal-priority goal should yield to a critical one, say that explicitly. "
         "End with 'Tomorrow's focus:' naming ONE priority. "
         "Never say 'the user', 'companion', or 'agent'. "
-        "Do not include any emojis."
+        f"{nightly_personality}"
     )
     user_prompt = (
         f"Goal states:\n{states_summary}\n\n"
@@ -900,7 +931,7 @@ def handle_nightly_summary(user_id: str, llm_fn: Callable[..., str]) -> dict:
             exa_results = exa_client.search_content_multi(topics, count=2)
             break
 
-    telegram_text = _build_telegram_message("*hackbitz -- Evening wrap-up*", body, exa_results or None)
+    telegram_text = _build_telegram_message("⚡ *hackbitz — Evening wrap-up* 🌙", body, exa_results or None)
     sent = _send_telegram(user_id, telegram_text)
 
     if sent:
@@ -923,8 +954,9 @@ def generate_nudge_message(goal: dict, user_id: str, llm_fn: Callable[..., str])
     agent_name = goal.get("agent_name", "Goal")
     goal_name = goal.get("name", "")
     personality = goal.get("personality", "warm")
+    chat_personality = _get_chat_personality_instruction(user_id)
 
-    personality_instruction = (
+    goal_instruction = (
         "Be strict and direct. No sugarcoating. Push them."
         if personality == "strict"
         else "Be warm and encouraging. Motivate gently."
@@ -932,10 +964,10 @@ def generate_nudge_message(goal: dict, user_id: str, llm_fn: Callable[..., str])
 
     system_prompt = (
         f"You are {agent_name}. "
-        f"{personality_instruction} "
+        f"{goal_instruction} "
+        f"{chat_personality} "
         "Write a 1-2 sentence reminder/nudge about their goal. "
-        "Never say 'the user', 'companion', or 'agent'. "
-        "Do not include any emojis."
+        "Never say 'the user', 'companion', or 'agent'."
     )
     body = llm_fn(
         [
@@ -944,15 +976,15 @@ def generate_nudge_message(goal: dict, user_id: str, llm_fn: Callable[..., str])
         ],
         0.7,
     )
-    return f"*{agent_name}*\n\n{body}"
+    return f"*{agent_name}* 🔔\n\n{body}"
 
 
-def generate_logcheck_message(goal: dict) -> str:
+def generate_logcheck_message(goal: dict, user_id: str | None = None) -> str:
     """Generate a log-check message for a goal (no LLM needed)."""
     agent_name = goal.get("agent_name", "Goal")
     goal_name = goal.get("name", "")
     personality = goal.get("personality", "warm")
 
     if personality == "strict":
-        return f"*{agent_name}*\n\nDid you do it? Log your progress on _{goal_name}_. No excuses."
-    return f"*{agent_name}*\n\nHow did it go with _{goal_name}_ today? Log your progress so I can help."
+        return f"*{agent_name}* 📋\n\nDid you do it? Log your progress on _{goal_name}_. No excuses. 💪"
+    return f"*{agent_name}* 📋\n\nHow did it go with _{goal_name}_ today? Log your progress so I can help. ✨"

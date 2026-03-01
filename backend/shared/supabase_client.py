@@ -297,6 +297,43 @@ def get_telegram_chat_id(user_id: str) -> str | None:
     return row[0]["telegram_chat_id"] if row else None
 
 
+def get_all_telegram_user_ids() -> list[str]:
+    """Return all user_ids that have a linked Telegram chat (for demo broadcast)."""
+    rows = (
+        get_client()
+        .table("telegram_user_mapping")
+        .select("user_id")
+        .execute()
+        .data
+    )
+    return [r["user_id"] for r in rows]
+
+
+def get_user_personality(user_id: str) -> str:
+    """Return the user's chat personality: roasting | playful | gentle. Default gentle."""
+    row = (
+        get_client()
+        .table("telegram_user_mapping")
+        .select("personality")
+        .eq("user_id", user_id)
+        .execute()
+        .data
+    )
+    if not row or not row[0].get("personality"):
+        return "gentle"
+    p = row[0]["personality"]
+    return p if p in ("roasting", "playful", "gentle") else "gentle"
+
+
+def update_user_personality(user_id: str, personality: str) -> None:
+    """Set the user's chat personality. personality must be roasting | playful | gentle."""
+    if personality not in ("roasting", "playful", "gentle"):
+        return
+    get_client().table("telegram_user_mapping").update(
+        {"personality": personality}
+    ).eq("user_id", user_id).execute()
+
+
 # --------------- helpers ---------------
 
 def _days_ago(days: int) -> str:

@@ -1,280 +1,427 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
-import { GoalForm } from "@/components/goal-form";
-import { ActivityLog } from "@/components/activity-log";
-import { AgentChat } from "@/components/agent-chat";
-import { AgentMemory } from "@/components/agent-memory";
-import { Badge } from "@/components/ui/badge";
-import { Button } from "@/components/ui/button";
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
-import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import Image from "next/image";
+import { motion } from "framer-motion";
 
-interface Goal {
-  id: string;
-  name: string;
-  type: string;
-  agent_template: string;
-  active: boolean;
-  end_at: string | null;
-  created_at: string;
+const TELEGRAM_URL = "https://t.me/hackbitz_bot";
+
+function HackbitzLogo({ className = "" }: { className?: string }) {
+  return (
+    <span className={`inline-flex items-baseline font-semibold tracking-tight ${className}`} style={{ fontFamily: "var(--font-plus-jakarta)" }}>
+      <span className="text-white">Hack</span>
+      <span className="italic text-emerald-400">bit</span>
+      <span className="text-white">z</span>
+    </span>
+  );
 }
 
-interface LogEntry {
-  id: string;
-  content: string;
-  created_at: string;
-  goals?: { name: string } | null;
-}
-
-interface AgentMessage {
-  id: string;
-  from_agent: string;
-  to_agent: string | null;
-  message: string;
-  created_at: string;
-  goal_id: string | null;
-}
-
-interface AgentState {
-  id: string;
-  goal_id: string;
-  updated_at: string;
-  state: {
-    last_checkin?: string;
-    pattern_detected?: string | null;
-    confidence?: number;
-    context_summary?: string;
-    next_action?: string;
-  };
-  goals?: { name: string; agent_template: string } | null;
-}
-
-const TEMPLATE_EMOJI: Record<string, string> = {
-  fitness:     "🏋️",
-  sleep:       "😴",
-  money:       "💰",
-  social:      "🤝",
-  short_lived: "🎯",
-  custom:      "✨",
+const container = {
+  hidden: { opacity: 0 },
+  show: {
+    opacity: 1,
+    transition: { staggerChildren: 0.06 },
+  },
 };
 
-const TEMPLATE_COLOR: Record<string, string> = {
-  fitness:     "bg-green-100 text-green-800",
-  sleep:       "bg-indigo-100 text-indigo-800",
-  money:       "bg-amber-100 text-amber-800",
-  social:      "bg-pink-100 text-pink-800",
-  short_lived: "bg-orange-100 text-orange-800",
-  custom:      "bg-gray-100 text-gray-800",
+const item = {
+  hidden: { opacity: 0, y: 16 },
+  show: { opacity: 1, y: 0 },
 };
+
+function ExaLogo({ className }: { className?: string }) {
+  return (
+    <motion.a
+      href="https://exa.ai"
+      target="_blank"
+      rel="noopener noreferrer"
+      className={`relative h-7 w-20 shrink-0 block ${className ?? ""}`}
+      aria-label="Exa"
+      whileHover={{ scale: 1.08, opacity: 1 }}
+      whileTap={{ scale: 0.98 }}
+      transition={{ type: "spring", stiffness: 400, damping: 25 }}
+    >
+      <Image
+        src="/landing/logos/exa.png"
+        alt="Exa"
+        fill
+        className="object-contain object-center pointer-events-none"
+      />
+    </motion.a>
+  );
+}
+
+function FeatureRow({
+  title,
+  description,
+  src,
+  alt,
+  imageLeft,
+}: {
+  title: string;
+  description: string;
+  src: string;
+  alt: string;
+  imageLeft: boolean;
+}) {
+  const textBlock = (
+    <div className="flex flex-col justify-center min-w-0 overflow-hidden">
+      <h3 className="text-2xl font-semibold text-white mb-3 break-words">{title}</h3>
+      <p className="text-zinc-400 text-base leading-relaxed max-w-md break-words">{description}</p>
+    </div>
+  );
+  const imageBlock = (
+    <motion.div
+      className="inline-flex"
+      whileHover={{ scale: 1.02 }}
+      transition={{ type: "spring", stiffness: 400, damping: 25 }}
+    >
+      <div className="relative w-[200px] sm:w-[220px] aspect-[9/16] shrink-0 rounded-xl overflow-hidden bg-zinc-900 border border-zinc-800 transition-colors duration-300 hover:border-emerald-500/40">
+        <Image src={src} alt={alt} fill className="object-cover object-top select-none" sizes="220px" />
+      </div>
+    </motion.div>
+  );
+  return (
+    <motion.div
+      variants={item}
+      className="grid grid-cols-1 md:grid-cols-2 gap-10 md:gap-16 items-center min-w-0 w-full"
+    >
+      {imageLeft ? (
+        <>
+          <div className="order-2 md:order-1 flex justify-center md:justify-start min-w-0">{imageBlock}</div>
+          <div className="order-1 md:order-2 min-w-0">{textBlock}</div>
+        </>
+      ) : (
+        <>
+          <div className="min-w-0">{textBlock}</div>
+          <div className="flex justify-center md:justify-end min-w-0">{imageBlock}</div>
+        </>
+      )}
+    </motion.div>
+  );
+}
 
 export default function Home() {
-  const [goals, setGoals] = useState<Goal[]>([]);
-  const [logs, setLogs] = useState<LogEntry[]>([]);
-  const [messages, setMessages] = useState<AgentMessage[]>([]);
-  const [agentStates, setAgentStates] = useState<AgentState[]>([]);
-  const [ticking, setTicking] = useState(false);
-  const [tickResult, setTickResult] = useState<string | null>(null);
-
-  const fetchGoals = useCallback(async () => {
-    const res = await fetch("/api/goals");
-    if (res.ok) setGoals(await res.json());
-  }, []);
-
-  const fetchLogs = useCallback(async () => {
-    const res = await fetch("/api/logs");
-    if (res.ok) setLogs(await res.json());
-  }, []);
-
-  const fetchMessages = useCallback(async () => {
-    const res = await fetch("/api/agent-messages");
-    if (res.ok) setMessages(await res.json());
-  }, []);
-
-  const fetchAgentStates = useCallback(async () => {
-    const res = await fetch("/api/agent-states");
-    if (res.ok) setAgentStates(await res.json());
-  }, []);
-
-  const triggerTick = useCallback(async () => {
-    setTicking(true);
-    setTickResult(null);
-    try {
-      const res = await fetch("/api/trigger-tick", { method: "POST" });
-      const data = await res.json();
-      if (data.status === "ok") {
-        setTickResult(`${data.goals_processed} companion${data.goals_processed !== 1 ? "s" : ""} checked in`);
-      } else if (data.status === "skipped") {
-        setTickResult("Nothing to check in on yet");
-      } else {
-        setTickResult(data.error || "Something went wrong");
-      }
-      fetchGoals();
-      fetchLogs();
-      fetchMessages();
-      fetchAgentStates();
-    } catch {
-      setTickResult("Couldn't reach your companions");
-    } finally {
-      setTicking(false);
-    }
-  }, [fetchGoals, fetchLogs, fetchMessages, fetchAgentStates]);
-
-  useEffect(() => {
-    fetchGoals();
-    fetchLogs();
-    fetchMessages();
-    fetchAgentStates();
-  }, [fetchGoals, fetchLogs, fetchMessages, fetchAgentStates]);
-
-  const activeGoals = goals.filter((g) => g.active);
-
   return (
-    <div className="min-h-screen bg-background">
-      <header className="border-b">
-        <div className="container mx-auto px-4 py-4 flex items-center justify-between">
-          <div>
-            <h1 className="text-2xl font-bold tracking-tight">LifeOS</h1>
-            <p className="text-sm text-muted-foreground">
-              A set of companions that keep you accountable — across every part of your life.
-            </p>
-          </div>
-          <div className="flex items-center gap-3">
-            {tickResult && (
-              <span className="text-xs text-muted-foreground">{tickResult}</span>
-            )}
-            <Button onClick={triggerTick} disabled={ticking} size="sm" variant="outline">
-              {ticking ? "Checking in…" : "Check in now"}
-            </Button>
+    <div className="min-h-screen w-full max-w-[100vw] overflow-x-hidden bg-black text-white">
+      {/* Nav: minimal, green CTA */}
+      <nav className="fixed top-0 left-0 right-0 z-50 border-b border-zinc-800/80 bg-black/90 backdrop-blur-md">
+        <div className="container mx-auto px-4 py-4 flex items-center justify-between max-w-6xl min-w-0">
+          <HackbitzLogo className="text-lg" />
+          <motion.a
+            href={TELEGRAM_URL}
+            target="_blank"
+            rel="noopener noreferrer"
+            className="inline-flex items-center justify-center rounded-lg px-4 py-2.5 text-sm font-medium bg-emerald-500 text-black hover:bg-emerald-400 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-400 focus-visible:ring-offset-2 focus-visible:ring-offset-black transition-colors"
+            whileHover={{ scale: 1.02 }}
+            whileTap={{ scale: 0.98 }}
+            transition={{ type: "spring", stiffness: 400, damping: 25 }}
+          >
+            Try on Telegram →
+          </motion.a>
+        </div>
+      </nav>
+
+      {/* Hero: headline, subline, dual CTA */}
+      <section className="relative pt-32 pb-20 sm:pt-40 sm:pb-28 overflow-hidden">
+        <div className="absolute inset-0 bg-[radial-gradient(ellipse_70%_50%_at_50%_-10%,rgba(16,185,129,0.12),transparent)] pointer-events-none" />
+        <div className="container mx-auto px-4 relative max-w-4xl min-w-0 text-center">
+          <motion.h1
+            initial={{ opacity: 0, y: 20 }}
+            animate={{ opacity: 1, y: 0 }}
+            transition={{ duration: 0.5 }}
+            className="text-4xl sm:text-5xl md:text-6xl font-bold tracking-tight text-white mb-6 leading-[1.1]"
+          >
+            AI agents that keep you
+            <br />
+            <span className="text-emerald-400">accountable for your habits</span>
+          </motion.h1>
+          <motion.p
+            initial={{ opacity: 0, y: 16 }}
+            animate={{ opacity: 1, y: 0 }}
+            transition={{ duration: 0.5, delay: 0.1 }}
+            className="text-lg sm:text-xl text-zinc-400 mb-10 max-w-2xl mx-auto leading-relaxed"
+          >
+            They know you across life, so they push you with everything in mind, keep expectations realistic, and help you win without burning you out. On Telegram.
+          </motion.p>
+          <motion.div
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            transition={{ delay: 0.25 }}
+            className="flex flex-wrap items-center justify-center gap-3"
+          >
+            <motion.a
+              href={TELEGRAM_URL}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="inline-flex items-center justify-center rounded-lg h-12 px-6 text-base font-medium bg-emerald-500 text-black hover:bg-emerald-400 transition-colors"
+              whileHover={{ scale: 1.02 }}
+              whileTap={{ scale: 0.98 }}
+              transition={{ type: "spring", stiffness: 400, damping: 25 }}
+            >
+              Try on Telegram →
+            </motion.a>
+            <motion.a
+              href="#features"
+              className="inline-flex items-center justify-center rounded-lg h-12 px-6 text-base font-medium border border-zinc-600 text-zinc-300 hover:border-zinc-500 hover:text-white transition-colors"
+              whileHover={{ scale: 1.02 }}
+              whileTap={{ scale: 0.98 }}
+              transition={{ type: "spring", stiffness: 400, damping: 25 }}
+            >
+              See how it works
+            </motion.a>
+          </motion.div>
+        </div>
+      </section>
+
+      {/* Powered by strip */}
+      <section className="py-10 border-y border-zinc-800/80">
+        <div className="container mx-auto px-4 max-w-6xl min-w-0">
+          <p className="text-center text-xs font-medium text-zinc-500 uppercase tracking-widest mb-8">
+            Powered by
+          </p>
+          <div className="flex flex-wrap items-center justify-center gap-x-12 gap-y-5 min-w-0">
+            <a
+              href="https://modal.com"
+              target="_blank"
+              rel="noopener noreferrer"
+              className="relative h-6 w-24 shrink-0 block opacity-70 hover:opacity-100 transition-opacity"
+              aria-label="Modal"
+            >
+              <Image src="/landing/logos/modal.png" alt="Modal" fill className="object-contain object-center pointer-events-none" />
+            </a>
+            <a
+              href="https://supermemory.ai"
+              target="_blank"
+              rel="noopener noreferrer"
+              className="relative h-6 w-36 shrink-0 block opacity-70 hover:opacity-100 transition-opacity"
+              aria-label="Supermemory"
+            >
+              <Image src="/landing/logos/supermemory.png" alt="Supermemory" fill className="object-contain object-center pointer-events-none" />
+            </a>
+            <ExaLogo className="opacity-70" />
           </div>
         </div>
-      </header>
+      </section>
 
-      <main className="container mx-auto px-4 py-8">
-        <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+      {/* Problem / value prop */}
+      <section className="py-20 sm:py-28">
+        <div className="container mx-auto px-4 max-w-4xl min-w-0 text-center">
+          <motion.h2
+            initial={{ opacity: 0, y: 16 }}
+            whileInView={{ opacity: 1, y: 0 }}
+            viewport={{ once: true }}
+            className="text-3xl sm:text-4xl font-bold text-white mb-6"
+          >
+            Your goals don’t stick
+            <br />
+            until someone’s keeping score
+          </motion.h2>
+          <motion.p
+            initial={{ opacity: 0, y: 12 }}
+            whileInView={{ opacity: 1, y: 0 }}
+            viewport={{ once: true }}
+            className="text-zinc-400 text-lg mb-12 max-w-2xl mx-auto"
+          >
+            Generic trackers are one-size-fits-all. Motivation fades. <HackbitzLogo /> gives each goal a dedicated agent and shared context so you get accountability that adapts.
+          </motion.p>
+          <motion.a
+            href={TELEGRAM_URL}
+            target="_blank"
+            rel="noopener noreferrer"
+            className="inline-flex items-center justify-center rounded-lg h-11 px-5 text-sm font-medium bg-emerald-500 text-black hover:bg-emerald-400 transition-colors"
+            whileHover={{ scale: 1.02 }}
+            whileTap={{ scale: 0.98 }}
+          >
+            Try <HackbitzLogo /> on Telegram →
+          </motion.a>
+        </div>
+      </section>
 
-          {/* Left column: add goal + share update */}
-          <div className="space-y-4">
-            <div>
-              <p className="text-xs font-medium text-muted-foreground uppercase tracking-wide mb-2 px-1">
-                New goal
-              </p>
-              <GoalForm onCreated={fetchGoals} />
-            </div>
-            <div>
-              <p className="text-xs font-medium text-muted-foreground uppercase tracking-wide mb-2 px-1">
-                Share an update
-              </p>
-              <ActivityLog onLogged={fetchLogs} />
-            </div>
-          </div>
+      {/* Feature pillars: 3 cards */}
+      <section className="py-16 sm:py-24 bg-zinc-950/80 border-y border-zinc-800/80">
+        <div className="container mx-auto px-4 max-w-5xl min-w-0">
+          <motion.h2
+            initial={{ opacity: 0, y: 12 }}
+            whileInView={{ opacity: 1, y: 0 }}
+            viewport={{ once: true }}
+            className="text-2xl sm:text-4xl font-bold text-white mb-12 text-center"
+          >
+            Accountability that adapts to every goal
+          </motion.h2>
+          <motion.div
+            variants={container}
+            initial="hidden"
+            whileInView="show"
+            viewport={{ once: true, margin: "-40px" }}
+            className="grid grid-cols-1 md:grid-cols-3 gap-6"
+          >
+            {[
+              { title: "Agent per goal", desc: "One dedicated agent per goal. Personalized replies and nudges so you stay on track.", border: "hover:border-emerald-500/30" },
+              { title: "Shared context", desc: "Agents know each other. Goals get redefined daily; focus stays clear, not overwhelming.", border: "hover:border-emerald-500/30" },
+              { title: "Commands & content", desc: "/checkin, /plan, /list. Plus relevant content (articles, apps, videos) via Exa when you need it.", border: "hover:border-emerald-500/30" },
+            ].map(({ title, desc, border }) => (
+              <motion.div
+                key={title}
+                variants={item}
+                className={`rounded-xl border border-zinc-800 bg-zinc-900/50 p-6 transition-colors duration-300 ${border}`}
+              >
+                <h3 className="text-xl font-semibold text-white mb-3">{title}</h3>
+                <p className="text-base text-zinc-400 leading-relaxed">{desc}</p>
+              </motion.div>
+            ))}
+          </motion.div>
+        </div>
+      </section>
 
-          {/* Middle column: goals + recent updates */}
-          <div className="space-y-6">
-            <Card>
-              <CardHeader className="pb-3">
-                <CardTitle className="text-base">
-                  What you&apos;re working on
-                  {activeGoals.length > 0 && (
-                    <span className="ml-2 text-sm font-normal text-muted-foreground">
-                      {activeGoals.length} active
-                    </span>
-                  )}
-                </CardTitle>
-              </CardHeader>
-              <CardContent className="space-y-2">
-                {activeGoals.length === 0 && (
-                  <p className="text-sm text-muted-foreground text-center py-4">
-                    Add your first goal above to get started.
-                  </p>
-                )}
-                {activeGoals.map((goal) => (
-                  <div
-                    key={goal.id}
-                    className="flex items-center justify-between p-3 rounded-lg border"
-                  >
-                    <div className="min-w-0">
-                      <p className="font-medium text-sm truncate">{goal.name}</p>
-                      {goal.end_at && (
-                        <p className="text-xs text-muted-foreground">
-                          Due {new Date(goal.end_at).toLocaleDateString()}
-                        </p>
-                      )}
-                    </div>
-                    <span className="ml-2 shrink-0 text-lg" title={goal.agent_template}>
-                      {TEMPLATE_EMOJI[goal.agent_template] ?? "✨"}
-                    </span>
-                  </div>
-                ))}
-              </CardContent>
-            </Card>
+      {/* Use-case sections with screenshots */}
+      <section id="features" className="py-20 sm:py-28 scroll-mt-20">
+        <div className="container mx-auto w-full max-w-5xl px-4 min-w-0">
+          <motion.h2
+            initial={{ opacity: 0, y: 12 }}
+            whileInView={{ opacity: 1, y: 0 }}
+            viewport={{ once: true }}
+            className="text-2xl sm:text-4xl font-bold text-white mb-4"
+          >
+            Agent replies & accountability
+          </motion.h2>
+          <motion.p
+            initial={{ opacity: 0, y: 12 }}
+            whileInView={{ opacity: 1, y: 0 }}
+            viewport={{ once: true }}
+            className="text-zinc-400 text-lg mb-12 max-w-xl"
+          >
+            A dedicated agent per goal. Personalized replies to your logs and relevant content so you stay on track.
+          </motion.p>
+          <motion.div
+            variants={container}
+            initial="hidden"
+            whileInView="show"
+            viewport={{ once: true, margin: "-60px" }}
+            className="space-y-20 md:space-y-24"
+          >
+            <FeatureRow title="Agent per goal" description="Each goal gets its own agent. A shared check-in summarizes what needs attention, streaks, and one clear focus." src="/landing/agent-per-goal.png" alt="Leetcode and Gym agents with hackbitz check-in" imageLeft={false} />
+            <FeatureRow title="Replies and content" description="Agents respond to your logs and surface relevant resources via Exa (apps, articles, videos) when you need a nudge." src="/landing/cuda-agent-exa.png" alt="CUDA agent reply with Exa suggestion" imageLeft={true} />
+            <FeatureRow title="When you're stuck" description="Get accountability and personalized reads when you're off track. Agents adjust tone and suggestions to help you get back on course." src="/landing/leetcode-burnout-exa.png" alt="Leetcode agent on burnout with Exa links" imageLeft={false} />
+          </motion.div>
+        </div>
+      </section>
 
-            <Tabs defaultValue="updates">
-              <TabsList className="w-full">
-                <TabsTrigger value="updates" className="flex-1">Recent updates</TabsTrigger>
-                <TabsTrigger value="all" className="flex-1">All goals</TabsTrigger>
-              </TabsList>
+      <section className="py-20 sm:py-28 border-t border-zinc-800/80 bg-zinc-950/50">
+        <div className="container mx-auto w-full max-w-5xl px-4 min-w-0">
+          <motion.h2
+            initial={{ opacity: 0, y: 12 }}
+            whileInView={{ opacity: 1, y: 0 }}
+            viewport={{ once: true }}
+            className="text-2xl sm:text-4xl font-bold text-white mb-4"
+          >
+            Goals and logging
+          </motion.h2>
+          <motion.p
+            initial={{ opacity: 0, y: 12 }}
+            whileInView={{ opacity: 1, y: 0 }}
+            viewport={{ once: true }}
+            className="text-zinc-400 text-lg mb-12 max-w-xl"
+          >
+            Add goals in plain language. Set nudge and log-check schedules. Log in free text; the bot routes to the right goal or asks to create one.
+          </motion.p>
+          <motion.div
+            variants={container}
+            initial="hidden"
+            whileInView="show"
+            viewport={{ once: true, margin: "-60px" }}
+            className="space-y-20 md:space-y-24"
+          >
+            <FeatureRow title="Add a goal" description="Natural language goal creation. Choose nudge and log-check times with inline buttons, no forms." src="/landing/add-goal-leetcode.png" alt="Add goal Daily Leetcode" imageLeft={false} />
+            <FeatureRow title="One agent per goal" description="Everything for that goal is tracked by a dedicated agent. Pick personality: direct or encouraging." src="/landing/add-goal-cuda.png" alt="Add goal CUDA" imageLeft={true} />
+            <FeatureRow title="Log classification" description="Unclear logs get a prompt: link to a goal or save as a general note. The bot learns your intent." src="/landing/log-classification.png" alt="Log classification" imageLeft={false} />
+          </motion.div>
+        </div>
+      </section>
 
-              <TabsContent value="updates">
-                <Card>
-                  <CardContent className="pt-4 space-y-3 max-h-80 overflow-y-auto">
-                    {logs.length === 0 && (
-                      <p className="text-sm text-muted-foreground text-center py-4">
-                        No updates yet — share what&apos;s going on.
-                      </p>
-                    )}
-                    {logs.map((log) => (
-                      <div key={log.id} className="text-sm border-b pb-2 last:border-0">
-                        <p className="leading-snug">{log.content}</p>
-                        <p className="text-xs text-muted-foreground mt-1">
-                          {new Date(log.created_at).toLocaleString()}
-                          {log.goals?.name && (
-                            <span className="ml-2 text-xs opacity-70">
-                              · {log.goals.name}
-                            </span>
-                          )}
-                        </p>
-                      </div>
-                    ))}
-                  </CardContent>
-                </Card>
-              </TabsContent>
+      <section className="py-20 sm:py-28 border-t border-zinc-800/80">
+        <div className="container mx-auto w-full max-w-5xl px-4 min-w-0">
+          <motion.h2
+            initial={{ opacity: 0, y: 12 }}
+            whileInView={{ opacity: 1, y: 0 }}
+            viewport={{ once: true }}
+            className="text-2xl sm:text-4xl font-bold text-white mb-4"
+          >
+            Commands and shared context
+          </motion.h2>
+          <motion.p
+            initial={{ opacity: 0, y: 12 }}
+            whileInView={{ opacity: 1, y: 0 }}
+            viewport={{ once: true }}
+            className="text-zinc-400 text-lg mb-12 max-w-xl"
+          >
+            /checkin for a snapshot across all goals. /plan for today's priorities. /list for active goals. Agents coordinate so focus stays clear.
+          </motion.p>
+          <motion.div
+            variants={container}
+            initial="hidden"
+            whileInView="show"
+            viewport={{ once: true, margin: "-60px" }}
+            className="space-y-20 md:space-y-24"
+          >
+            <FeatureRow title="Check-in scorecard" description="One message: needs attention, streaks, and one clear recommendation from hackbitz across every goal." src="/landing/checkin-scorecard.png" alt="Check-in scorecard" imageLeft={false} />
+            <FeatureRow title="Plan and list" description="/plan and /list: today's priorities and all goals. Agents know each other so they don't overload you." src="/landing/plan-list.png" alt="Plan and list commands" imageLeft={true} />
+          </motion.div>
+        </div>
+      </section>
 
-              <TabsContent value="all">
-                <Card>
-                  <CardContent className="pt-4 space-y-2">
-                    {goals.length === 0 && (
-                      <p className="text-sm text-muted-foreground text-center py-4">No goals yet.</p>
-                    )}
-                    {goals.map((goal) => (
-                      <div
-                        key={goal.id}
-                        className="flex items-center justify-between text-sm border-b pb-2 last:border-0"
-                      >
-                        <span className={goal.active ? "" : "line-through text-muted-foreground"}>
-                          {goal.name}
-                        </span>
-                        <Badge
-                          variant="secondary"
-                          className={`text-xs ${TEMPLATE_COLOR[goal.agent_template] ?? TEMPLATE_COLOR.custom}`}
-                        >
-                          {goal.active ? "active" : "done"}
-                        </Badge>
-                      </div>
-                    ))}
-                  </CardContent>
-                </Card>
-              </TabsContent>
-            </Tabs>
-          </div>
+      {/* Final CTA */}
+      <section className="py-24 sm:py-32 border-t border-zinc-800/80 bg-zinc-950/80">
+        <div className="container mx-auto px-4 text-center max-w-2xl min-w-0">
+          <motion.h2
+            initial={{ opacity: 0, y: 12 }}
+            whileInView={{ opacity: 1, y: 0 }}
+            viewport={{ once: true }}
+            className="text-2xl sm:text-3xl md:text-4xl font-bold text-white mb-4"
+          >
+            Get accountability that adapts
+          </motion.h2>
+          <motion.p
+            initial={{ opacity: 0, y: 12 }}
+            whileInView={{ opacity: 1, y: 0 }}
+            viewport={{ once: true }}
+            className="text-zinc-400 text-lg mb-10"
+          >
+            Try <HackbitzLogo /> on Telegram. One bot, one place: goals, logs, and agents that know each other.
+          </motion.p>
+          <motion.a
+            href={TELEGRAM_URL}
+            target="_blank"
+            rel="noopener noreferrer"
+            className="inline-flex items-center justify-center rounded-lg h-12 px-8 text-base font-medium bg-emerald-500 text-black hover:bg-emerald-400 transition-colors"
+            whileHover={{ scale: 1.02 }}
+            whileTap={{ scale: 0.98 }}
+            transition={{ type: "spring", stiffness: 400, damping: 25 }}
+          >
+            Try on Telegram: @hackbitz_bot →
+          </motion.a>
+        </div>
+      </section>
 
-          {/* Right column: companion messages + reasoning */}
-          <div className="space-y-6">
-            <AgentChat messages={messages} />
-            <AgentMemory states={agentStates} />
+      {/* Footer: tagline + links */}
+      <footer className="border-t border-zinc-800/80 py-12">
+        <div className="container mx-auto px-4 max-w-6xl min-w-0">
+          <p className="text-center text-xl font-semibold text-zinc-500 mb-8">
+            Goals without accountability are just wishes.
+          </p>
+          <div className="flex flex-col sm:flex-row items-center justify-between gap-6">
+            <HackbitzLogo className="text-sm text-zinc-500 [&_span]:text-inherit" />
+            <motion.a
+              href={TELEGRAM_URL}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="text-sm text-zinc-400 hover:text-emerald-400 transition-colors"
+            >
+              @hackbitz_bot on Telegram
+            </motion.a>
+            <span className="text-xs text-zinc-600">Powered by Modal, Supermemory, Exa</span>
           </div>
         </div>
-      </main>
+      </footer>
     </div>
   );
 }
