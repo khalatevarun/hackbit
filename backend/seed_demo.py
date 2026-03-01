@@ -20,6 +20,7 @@ Usage:
 """
 from __future__ import annotations
 
+import os
 import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -224,6 +225,16 @@ def seed(do_reset: bool = False):
         client.table("user_logs").insert(row).execute()
 
     print("Done.\n")
+
+    # Optional: link one Telegram chat to the demo user so that chat sees seeded data
+    telegram_chat_id = os.environ.get("TELEGRAM_CHAT_ID", "").strip()
+    if telegram_chat_id:
+        client.table("telegram_user_mapping").upsert(
+            {"telegram_chat_id": telegram_chat_id, "user_id": MOCK_USER_ID},
+            on_conflict="telegram_chat_id",
+        ).execute()
+        print(f"Linked TELEGRAM_CHAT_ID to demo user {MOCK_USER_ID[:8]}... (that chat will see seeded goals)\n")
+
     print("=" * 65)
     print("DEMO SCENARIO: 'The ML Assignment That Ate My Life'")
     print("=" * 65)

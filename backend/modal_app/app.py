@@ -117,6 +117,35 @@ def _import_agent(dotted_path: str):
     return getattr(mod, class_name)
 
 # ---------------------------------------------------------------------------
+# User data wipe
+# ---------------------------------------------------------------------------
+
+def _wipe_user_data(user_id: str) -> None:
+    """Delete all Supabase + Supermemory data for a user."""
+    import os
+    import requests as http_requests
+    from shared import supabase_client as _db
+
+    client = _db.get_client()
+    for table in ["agent_messages", "agent_states", "interventions", "user_logs", "goals"]:
+        client.table(table).delete().eq("user_id", user_id).execute()
+
+    api_key = os.environ.get("SUPERMEMORY_API_KEY", "")
+    if api_key:
+        tag = f"user:{user_id}"
+        try:
+            http_requests.delete(
+                f"https://api.supermemory.ai/v3/container-tags/{tag}",
+                headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+                timeout=15,
+            )
+        except Exception as e:
+            print(f"[reset] Supermemory wipe failed for {user_id[:8]}: {e}")
+
+    print(f"[reset] Wiped all data for user {user_id[:8]}")
+
+
+# ---------------------------------------------------------------------------
 # Modal functions
 # ---------------------------------------------------------------------------
 
@@ -307,36 +336,100 @@ def telegram_webhook(body: dict):
     import os
     from groq import Groq
     from shared import supabase_client as db
-    from shared.telegram_client import parse_webhook_update, send_message
+    from shared.telegram_client import (
+        parse_webhook_update,
+        send_message,
+        send_message_with_buttons,
+        answer_callback_query,
+    )
     from modal_app.coordinator import (
         HELP_TEXT,
         handle_status_command,
         handle_confused_command,
         handle_plan_command,
+        handle_addgoal_command,
+        handle_deletegoal_list_command,
+        handle_deletegoal_number_command,
     )
-
-    MOCK_USER_ID = "00000000-0000-0000-0000-000000000001"
 
     update = parse_webhook_update(body)
     if not update:
         return {"status": "ignored"}
 
-    text = update["text"]
     chat_id = update["chat_id"]
+    user_id, is_new = db.get_or_create_user_by_telegram_chat(chat_id)
+
+    # --- Handle callback queries (inline button presses) ---
+    if update["type"] == "callback":
+        answer_callback_query(update["callback_query_id"])
+        data = update["data"]
+
+        # classify:confirm:<log_id>:<goal_id>
+        if data.startswith("cls:c:"):
+            parts = data.split(":", 3)
+            if len(parts) == 4:
+                log_id, goal_id = parts[2], parts[3]
+                db.update_log_goal(log_id, goal_id)
+                goal_info = next(
+                    (g for g in db.get_active_goals(user_id=user_id) if g["id"] == goal_id),
+                    None,
+                )
+                goal_name = goal_info["name"] if goal_info else "that goal"
+                send_message(chat_id, f"⚡ *hackbitz*\n\nGot it — logged under _{goal_name}_.")
+                _tick_for_user.spawn(user_id, "reactive_log", goal_id)
+            return {"status": "ok", "callback": "confirm"}
+
+        # classify:skip:<log_id>
+        if data.startswith("cls:s:"):
+            send_message(chat_id, "⚡ *hackbitz*\n\nSaved without linking to a goal.")
+            return {"status": "ok", "callback": "skip"}
+
+        # classify:new:<log_id>
+        if data.startswith("cls:n:"):
+            send_message(
+                chat_id,
+                "⚡ *hackbitz*\n\nSend me `/addgoal <description>` to create a new goal for this.",
+            )
+            return {"status": "ok", "callback": "new"}
+
+        # reset:confirm / reset:cancel
+        if data == "reset:confirm":
+            _wipe_user_data(user_id)
+            send_message(
+                chat_id,
+                "⚡ *hackbitz*\n\nDone — everything has been wiped. You're starting fresh.\n\n"
+                "Use /addgoal to set up your first goal.",
+            )
+            return {"status": "ok", "callback": "reset_confirm"}
+
+        if data == "reset:cancel":
+            send_message(chat_id, "⚡ *hackbitz*\n\nCancelled. Your data is safe.")
+            return {"status": "ok", "callback": "reset_cancel"}
+
+        return {"status": "ignored", "reason": "unknown callback"}
+
+    text = update.get("text", "")
+    if not text:
+        return {"status": "ignored"}
+    if is_new:
+        send_message(
+            chat_id,
+            "⚡ *hackbitz*\n\nHi, I'm hackbitz. Use /addgoal to add a goal, /help for commands.",
+        )
 
     # --- Command routing ---
     if text == "/status":
-        status_text = handle_status_command(MOCK_USER_ID)
+        status_text = handle_status_command(user_id)
         send_message(chat_id, status_text)
         return {"status": "ok", "command": "/status"}
 
     if text == "/confused":
-        response_text = handle_confused_command(MOCK_USER_ID, _llm_call_coordinator)
+        response_text = handle_confused_command(user_id, _llm_call_coordinator)
         send_message(chat_id, response_text)
         return {"status": "ok", "command": "/confused"}
 
     if text == "/plan":
-        response_text = handle_plan_command(MOCK_USER_ID, _llm_call_coordinator)
+        response_text = handle_plan_command(user_id, _llm_call_coordinator)
         send_message(chat_id, response_text)
         return {"status": "ok", "command": "/plan"}
 
@@ -344,13 +437,51 @@ def telegram_webhook(body: dict):
         send_message(chat_id, HELP_TEXT)
         return {"status": "ok", "command": "/help"}
 
+    if text == "/checkin":
+        send_message(chat_id, "⚡ *hackbitz*\n\nOn it — checking in on everything right now. Give me a minute.")
+        _tick_for_user.spawn(user_id, "checkin")
+        return {"status": "ok", "command": "/checkin"}
+
+    if text == "/deletegoal":
+        response_text = handle_deletegoal_list_command(user_id)
+        send_message(chat_id, response_text)
+        return {"status": "ok", "command": "/deletegoal"}
+
+    if text.startswith("/deletegoal "):
+        arg = text[len("/deletegoal "):].strip()
+        try:
+            number = int(arg)
+            response_text = handle_deletegoal_number_command(user_id, number)
+        except ValueError:
+            response_text = "⚡ *hackbitz*\n\nUse `/deletegoal` to see your goals, then `/deletegoal <number>` to remove one."
+        send_message(chat_id, response_text)
+        return {"status": "ok", "command": "/deletegoal"}
+
+    if text.startswith("/addgoal"):
+        description = text[len("/addgoal"):].strip()
+        response_text = handle_addgoal_command(description, user_id, _llm_call_coordinator)
+        send_message(chat_id, response_text)
+        return {"status": "ok", "command": "/addgoal"}
+
+    if text == "/reset":
+        send_message_with_buttons(
+            chat_id,
+            "⚡ *hackbitz*\n\nThis will delete all your goals, logs, and history. Are you sure?",
+            [[
+                {"text": "Yes, wipe everything", "callback_data": "reset:confirm"},
+                {"text": "Cancel", "callback_data": "reset:cancel"},
+            ]],
+        )
+        return {"status": "ok", "command": "/reset"}
+
     if text.startswith("/"):
         return {"status": "ignored", "reason": "unknown command"}
 
     # --- Text log: classify → save → spawn reactive analysis ---
     classified_goal_id = None
+    confidence = 0.0
+    goals = db.get_active_goals(user_id=user_id)
     try:
-        goals = db.get_active_goals(user_id=MOCK_USER_ID)
         if goals:
             goal_list = "\n".join(
                 f"- id: {g['id']} | name: \"{g['name']}\" | type: {g['agent_template']}"
@@ -364,7 +495,15 @@ def telegram_webhook(body: dict):
                         "role": "system",
                         "content": (
                             "Match the user's journal entry to the most relevant active goal. "
-                            "Return ONLY valid JSON: {\"goal_id\": \"<id or null>\"}"
+                            "Return ONLY valid JSON: "
+                            '{"goal_id": "<best matching goal id or null>", '
+                            '"confidence": <0.0-1.0 how sure you are>, '
+                            '"reason": "<one short phrase explaining the match>"}\n\n'
+                            "Rules:\n"
+                            "- Always pick the single best match if one exists, even if uncertain.\n"
+                            "- confidence >= 0.7 means you're sure it fits.\n"
+                            "- confidence < 0.7 means it's a guess — the user will be asked to confirm.\n"
+                            "- If truly nothing fits at all, return goal_id: null with confidence: 0."
                         ),
                     },
                     {
@@ -373,7 +512,7 @@ def telegram_webhook(body: dict):
                     },
                 ],
                 temperature=0.1,
-                max_tokens=64,
+                max_tokens=128,
             )
             import json, re
             raw = resp.choices[0].message.content.strip()
@@ -381,22 +520,62 @@ def telegram_webhook(body: dict):
             raw = re.sub(r"\n?```\s*$", "", raw)
             parsed = json.loads(raw)
             gid = parsed.get("goal_id")
+            confidence = float(parsed.get("confidence", 0.0))
             if gid and any(g["id"] == gid for g in goals):
                 classified_goal_id = gid
     except Exception as e:
         print(f"[telegram_webhook] Classification error: {e}")
 
-    db.create_log(
-        user_id=MOCK_USER_ID,
+    # High confidence or no goals → save and proceed
+    if confidence >= 0.7 or not goals:
+        log = db.create_log(
+            user_id=user_id,
+            content=text,
+            goal_id=classified_goal_id,
+            source="manual_input",
+        )
+        print(f"[telegram_webhook] Saved log (confident), goal_id={classified_goal_id}")
+        _tick_for_user.spawn(user_id, "reactive_log", classified_goal_id, text)
+        return {"status": "ok", "goal_id": classified_goal_id}
+
+    # Low confidence → save without goal, ask user to confirm
+    log = db.create_log(
+        user_id=user_id,
         content=text,
-        goal_id=classified_goal_id,
+        goal_id=None,
         source="manual_input",
     )
-    print(f"[telegram_webhook] Saved log, goal_id={classified_goal_id}, spawning reactive tick")
+    log_id = log["id"]
 
-    # Fire-and-forget: run agents then respond on behalf of the matching agent
-    _tick_for_user.spawn(MOCK_USER_ID, "reactive_log", classified_goal_id, text)
-    return {"status": "ok", "goal_id": classified_goal_id}
+    if classified_goal_id:
+        goal_info = next((g for g in goals if g["id"] == classified_goal_id), None)
+        goal_name = goal_info["name"] if goal_info else "Unknown"
+        goal_emoji = {"sleep": "🌙", "fitness": "🏃", "money": "💰", "social": "🤝",
+                      "short_lived": "📚", "custom": "📚"}.get(
+            goal_info.get("agent_template", ""), "📌") if goal_info else "📌"
+        buttons = [
+            [{"text": f"Yes, log under {goal_emoji} {goal_name}", "callback_data": f"cls:c:{log_id}:{classified_goal_id}"}],
+            [
+                {"text": "Create new goal", "callback_data": f"cls:n:{log_id}"},
+                {"text": "Just save it", "callback_data": f"cls:s:{log_id}"},
+            ],
+        ]
+        send_message_with_buttons(
+            chat_id,
+            f"⚡ *hackbitz*\n\nThis sounds like it could be part of _{goal_name}_. Should I log it there?",
+            buttons,
+        )
+    else:
+        buttons = [
+            [{"text": "Create new goal", "callback_data": f"cls:n:{log_id}"}],
+            [{"text": "Just save it", "callback_data": f"cls:s:{log_id}"}],
+        ]
+        send_message_with_buttons(
+            chat_id,
+            "⚡ *hackbitz*\n\nI'm not sure which goal this belongs to. Want to create a new goal for it, or just save it as a general note?",
+            buttons,
+        )
+    return {"status": "ok", "goal_id": None, "pending_confirmation": True}
 
 
 @app.function(image=agent_image, secrets=secrets, timeout=300)
@@ -426,17 +605,37 @@ def _tick_for_user(
         print(f"[_tick_for_user] No active goals for {user_id[:8]}")
         return
 
-    # Run all agents (updates states + state_history)
-    list(run_agent_for_goal.map(active_goals))
+    if mode == "reactive_log":
+        # For the matched goal, ensure an agent_state exists before the coordinator
+        # reads it. New goals won't have one yet (agents haven't run).
+        if source_goal_id:
+            matched = [g for g in active_goals if g["id"] == source_goal_id]
+            if matched:
+                from shared import supabase_client as check_db
+                existing = check_db.get_agent_states_for_user(user_id)
+                has_state = any(s["goal_id"] == source_goal_id for s in existing)
+                if not has_state:
+                    run_agent_for_goal.remote(matched[0])
 
-    # Coordinate based on mode
-    coordinate_for_user(
-        user_id,
-        llm_fn=_llm_call_coordinator,
-        mode=mode,
-        source_goal_id=source_goal_id,
-        trigger_log=trigger_log,
-    )
+        # Coordinator responds using latest states, then remaining agents update.
+        coordinate_for_user(
+            user_id,
+            llm_fn=_llm_call_coordinator,
+            mode=mode,
+            source_goal_id=source_goal_id,
+            trigger_log=trigger_log,
+        )
+        list(run_agent_for_goal.map(active_goals))
+    else:
+        # For cron ticks, checkin, etc. — run agents first, then coordinate.
+        list(run_agent_for_goal.map(active_goals))
+        coordinate_for_user(
+            user_id,
+            llm_fn=_llm_call_coordinator,
+            mode=mode,
+            source_goal_id=source_goal_id,
+            trigger_log=trigger_log,
+        )
 
 
 @app.local_entrypoint()

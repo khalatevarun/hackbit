@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import uuid
 from datetime import datetime, timezone
 from typing import Any
 
@@ -71,6 +72,11 @@ def create_log(
     if goal_id:
         row["goal_id"] = goal_id
     return get_client().table("user_logs").insert(row).execute().data[0]
+
+
+def update_log_goal(log_id: str, goal_id: str) -> None:
+    """Assign a goal to an existing log entry."""
+    get_client().table("user_logs").update({"goal_id": goal_id}).eq("id", log_id).execute()
 
 
 def get_recent_logs(
@@ -239,6 +245,40 @@ def get_agent_messages(
         .execute()
         .data
     )
+
+
+# --------------- telegram_user_mapping ---------------
+
+def get_or_create_user_by_telegram_chat(chat_id: str) -> tuple[str, bool]:
+    """Resolve or create user_id for a Telegram chat_id. Returns (user_id, is_new)."""
+    row = (
+        get_client()
+        .table("telegram_user_mapping")
+        .select("user_id")
+        .eq("telegram_chat_id", chat_id)
+        .execute()
+        .data
+    )
+    if row:
+        return (row[0]["user_id"], False)
+    new_id = str(uuid.uuid4())
+    get_client().table("telegram_user_mapping").insert(
+        {"telegram_chat_id": chat_id, "user_id": new_id}
+    ).execute()
+    return (new_id, True)
+
+
+def get_telegram_chat_id(user_id: str) -> str | None:
+    """Return telegram_chat_id for a user_id, or None if not linked (e.g. web-only user)."""
+    row = (
+        get_client()
+        .table("telegram_user_mapping")
+        .select("telegram_chat_id")
+        .eq("user_id", user_id)
+        .execute()
+        .data
+    )
+    return row[0]["telegram_chat_id"] if row else None
 
 
 # --------------- helpers ---------------
