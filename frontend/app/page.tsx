@@ -2,6 +2,7 @@
 
 import Image from "next/image";
 import { motion } from "framer-motion";
+import { AppStoreGallery } from "@/components/app-store-gallery";
 
 const TELEGRAM_URL = "https://t.me/hackbitz_bot";
 
@@ -34,7 +35,7 @@ function ExaLogo({ className }: { className?: string }) {
       href="https://exa.ai"
       target="_blank"
       rel="noopener noreferrer"
-      className={`relative h-7 w-20 shrink-0 block ${className ?? ""}`}
+      className={`relative h-10 w-28 shrink-0 block ${className ?? ""}`}
       aria-label="Exa"
       whileHover={{ scale: 1.08, opacity: 1 }}
       whileTap={{ scale: 0.98 }}
@@ -50,59 +51,9 @@ function ExaLogo({ className }: { className?: string }) {
   );
 }
 
-function FeatureRow({
-  title,
-  description,
-  src,
-  alt,
-  imageLeft,
-}: {
-  title: string;
-  description: string;
-  src: string;
-  alt: string;
-  imageLeft: boolean;
-}) {
-  const textBlock = (
-    <div className="flex flex-col justify-center min-w-0 overflow-hidden">
-      <h3 className="text-2xl font-semibold text-white mb-3 break-words">{title}</h3>
-      <p className="text-zinc-400 text-base leading-relaxed max-w-md break-words">{description}</p>
-    </div>
-  );
-  const imageBlock = (
-    <motion.div
-      className="inline-flex"
-      whileHover={{ scale: 1.02 }}
-      transition={{ type: "spring", stiffness: 400, damping: 25 }}
-    >
-      <div className="relative w-[200px] sm:w-[220px] aspect-[9/16] shrink-0 rounded-xl overflow-hidden bg-zinc-900 border border-zinc-800 transition-colors duration-300 hover:border-emerald-500/40">
-        <Image src={src} alt={alt} fill className="object-cover object-top select-none" sizes="220px" />
-      </div>
-    </motion.div>
-  );
-  return (
-    <motion.div
-      variants={item}
-      className="grid grid-cols-1 md:grid-cols-2 gap-10 md:gap-16 items-center min-w-0 w-full"
-    >
-      {imageLeft ? (
-        <>
-          <div className="order-2 md:order-1 flex justify-center md:justify-start min-w-0">{imageBlock}</div>
-          <div className="order-1 md:order-2 min-w-0">{textBlock}</div>
-        </>
-      ) : (
-        <>
-          <div className="min-w-0">{textBlock}</div>
-          <div className="flex justify-center md:justify-end min-w-0">{imageBlock}</div>
-        </>
-      )}
-    </motion.div>
-  );
-}
-
 export default function Home() {
   return (
-    <div className="min-h-screen w-full max-w-[100vw] overflow-x-hidden bg-black text-white">
+    <div className="min-h-screen w-full max-w-[100vw] overflow-x-clip bg-black text-white">
       {/* Nav: minimal, green CTA */}
       <nav className="fixed top-0 left-0 right-0 z-50 border-b border-zinc-800/80 bg-black/90 backdrop-blur-md">
         <div className="container mx-auto px-4 py-4 flex items-center justify-between max-w-6xl min-w-0">
@@ -184,7 +135,7 @@ export default function Home() {
               href="https://modal.com"
               target="_blank"
               rel="noopener noreferrer"
-              className="relative h-6 w-24 shrink-0 block opacity-70 hover:opacity-100 transition-opacity"
+              className="relative h-10 w-32 shrink-0 block opacity-70 hover:opacity-100 transition-opacity"
               aria-label="Modal"
             >
               <Image src="/landing/logos/modal.png" alt="Modal" fill className="object-contain object-center pointer-events-none" />
@@ -193,7 +144,7 @@ export default function Home() {
               href="https://supermemory.ai"
               target="_blank"
               rel="noopener noreferrer"
-              className="relative h-6 w-36 shrink-0 block opacity-70 hover:opacity-100 transition-opacity"
+              className="relative h-10 w-44 shrink-0 block opacity-70 hover:opacity-100 transition-opacity"
               aria-label="Supermemory"
             >
               <Image src="/landing/logos/supermemory.png" alt="Supermemory" fill className="object-contain object-center pointer-events-none" />
@@ -210,7 +161,7 @@ export default function Home() {
             initial={{ opacity: 0, y: 16 }}
             whileInView={{ opacity: 1, y: 0 }}
             viewport={{ once: true }}
-            className="text-3xl sm:text-4xl font-bold text-white mb-6"
+            className="text-4xl sm:text-5xl md:text-6xl font-bold text-white mb-8 leading-[1.1]"
           >
             Your goals don’t stick
             <br />
@@ -220,7 +171,7 @@ export default function Home() {
             initial={{ opacity: 0, y: 12 }}
             whileInView={{ opacity: 1, y: 0 }}
             viewport={{ once: true }}
-            className="text-zinc-400 text-lg mb-12 max-w-2xl mx-auto"
+            className="text-zinc-400 text-xl sm:text-2xl mb-12 max-w-2xl mx-auto leading-relaxed"
           >
             Generic trackers are one-size-fits-all. Motivation fades. <HackbitzLogo /> gives each goal a dedicated agent and shared context so you get accountability that adapts.
           </motion.p>
@@ -228,11 +179,11 @@ export default function Home() {
             href={TELEGRAM_URL}
             target="_blank"
             rel="noopener noreferrer"
-            className="inline-flex items-center justify-center rounded-lg h-11 px-5 text-sm font-medium bg-emerald-500 text-black hover:bg-emerald-400 transition-colors"
+            className="inline-flex items-center justify-center gap-1.5 rounded-lg h-12 px-6 text-base font-medium bg-black text-emerald-400 border border-emerald-500/30 hover:border-emerald-400/50 hover:text-emerald-300 transition-colors"
             whileHover={{ scale: 1.02 }}
             whileTap={{ scale: 0.98 }}
           >
-            Try <HackbitzLogo /> on Telegram →
+            Try <HackbitzLogo className="[&_span]:text-emerald-400" /> on Telegram →
           </motion.a>
         </div>
       </section>
@@ -273,101 +224,37 @@ export default function Home() {
         </div>
       </section>
 
-      {/* Use-case sections with screenshots */}
-      <section id="features" className="py-20 sm:py-28 scroll-mt-20">
-        <div className="container mx-auto w-full max-w-5xl px-4 min-w-0">
-          <motion.h2
-            initial={{ opacity: 0, y: 12 }}
-            whileInView={{ opacity: 1, y: 0 }}
-            viewport={{ once: true }}
-            className="text-2xl sm:text-4xl font-bold text-white mb-4"
-          >
-            Agent replies & accountability
-          </motion.h2>
-          <motion.p
-            initial={{ opacity: 0, y: 12 }}
-            whileInView={{ opacity: 1, y: 0 }}
-            viewport={{ once: true }}
-            className="text-zinc-400 text-lg mb-12 max-w-xl"
-          >
-            A dedicated agent per goal. Personalized replies to your logs and relevant content so you stay on track.
-          </motion.p>
-          <motion.div
-            variants={container}
-            initial="hidden"
-            whileInView="show"
-            viewport={{ once: true, margin: "-60px" }}
-            className="space-y-20 md:space-y-24"
-          >
-            <FeatureRow title="Agent per goal" description="Each goal gets its own agent. A shared check-in summarizes what needs attention, streaks, and one clear focus." src="/landing/agent-per-goal.png" alt="Leetcode and Gym agents with hackbitz check-in" imageLeft={false} />
-            <FeatureRow title="Replies and content" description="Agents respond to your logs and surface relevant resources via Exa (apps, articles, videos) when you need a nudge." src="/landing/cuda-agent-exa.png" alt="CUDA agent reply with Exa suggestion" imageLeft={true} />
-            <FeatureRow title="When you're stuck" description="Get accountability and personalized reads when you're off track. Agents adjust tone and suggestions to help you get back on course." src="/landing/leetcode-burnout-exa.png" alt="Leetcode agent on burnout with Exa links" imageLeft={false} />
-          </motion.div>
-        </div>
-      </section>
+      {/* App store screenshot gallery */}
+      <AppStoreGallery
+        id="features"
+        sectionTitle="Agent replies & accountability"
+        sectionDescription="A dedicated agent per goal. Personalized replies to your logs and relevant content so you stay on track."
+        items={[
+          { title: "Agent per goal", description: "Each goal gets its own agent. A shared check-in summarizes what needs attention, streaks, and one clear focus.", src: "/landing/agent-per-goal.png", alt: "Leetcode and Gym agents with hackbitz check-in" },
+          { title: "Replies and content", description: "Agents respond to your logs and surface relevant resources via Exa (apps, articles, videos) when you need a nudge.", src: "/landing/cuda-agent-exa.png", alt: "CUDA agent reply with Exa suggestion" },
+          { title: "When you're stuck", description: "Get accountability and personalized reads when you're off track. Agents adjust tone and suggestions to help you get back on course.", src: "/landing/leetcode-burnout-exa.png", alt: "Leetcode agent on burnout with Exa links" },
+        ]}
+      />
 
-      <section className="py-20 sm:py-28 border-t border-zinc-800/80 bg-zinc-950/50">
-        <div className="container mx-auto w-full max-w-5xl px-4 min-w-0">
-          <motion.h2
-            initial={{ opacity: 0, y: 12 }}
-            whileInView={{ opacity: 1, y: 0 }}
-            viewport={{ once: true }}
-            className="text-2xl sm:text-4xl font-bold text-white mb-4"
-          >
-            Goals and logging
-          </motion.h2>
-          <motion.p
-            initial={{ opacity: 0, y: 12 }}
-            whileInView={{ opacity: 1, y: 0 }}
-            viewport={{ once: true }}
-            className="text-zinc-400 text-lg mb-12 max-w-xl"
-          >
-            Add goals in plain language. Set nudge and log-check schedules. Log in free text; the bot routes to the right goal or asks to create one.
-          </motion.p>
-          <motion.div
-            variants={container}
-            initial="hidden"
-            whileInView="show"
-            viewport={{ once: true, margin: "-60px" }}
-            className="space-y-20 md:space-y-24"
-          >
-            <FeatureRow title="Add a goal" description="Natural language goal creation. Choose nudge and log-check times with inline buttons, no forms." src="/landing/add-goal-leetcode.png" alt="Add goal Daily Leetcode" imageLeft={false} />
-            <FeatureRow title="One agent per goal" description="Everything for that goal is tracked by a dedicated agent. Pick personality: direct or encouraging." src="/landing/add-goal-cuda.png" alt="Add goal CUDA" imageLeft={true} />
-            <FeatureRow title="Log classification" description="Unclear logs get a prompt: link to a goal or save as a general note. The bot learns your intent." src="/landing/log-classification.png" alt="Log classification" imageLeft={false} />
-          </motion.div>
-        </div>
-      </section>
+      <AppStoreGallery
+        className="bg-zinc-950/50"
+        sectionTitle="Goals and logging"
+        sectionDescription="Add goals in plain language. Set nudge and log-check schedules. Log in free text; the bot routes to the right goal or asks to create one."
+        items={[
+          { title: "Add a goal", description: "Natural language goal creation. Choose nudge and log-check times with inline buttons, no forms.", src: "/landing/add-goal-leetcode.png", alt: "Add goal Daily Leetcode" },
+          { title: "One agent per goal", description: "Everything for that goal is tracked by a dedicated agent. Pick personality: direct or encouraging.", src: "/landing/add-goal-cuda.png", alt: "Add goal CUDA" },
+          { title: "Log classification", description: "Unclear logs get a prompt: link to a goal or save as a general note. The bot learns your intent.", src: "/landing/log-classification.png", alt: "Log classification" },
+        ]}
+      />
 
-      <section className="py-20 sm:py-28 border-t border-zinc-800/80">
-        <div className="container mx-auto w-full max-w-5xl px-4 min-w-0">
-          <motion.h2
-            initial={{ opacity: 0, y: 12 }}
-            whileInView={{ opacity: 1, y: 0 }}
-            viewport={{ once: true }}
-            className="text-2xl sm:text-4xl font-bold text-white mb-4"
-          >
-            Commands and shared context
-          </motion.h2>
-          <motion.p
-            initial={{ opacity: 0, y: 12 }}
-            whileInView={{ opacity: 1, y: 0 }}
-            viewport={{ once: true }}
-            className="text-zinc-400 text-lg mb-12 max-w-xl"
-          >
-            /checkin for a snapshot across all goals. /plan for today's priorities. /list for active goals. Agents coordinate so focus stays clear.
-          </motion.p>
-          <motion.div
-            variants={container}
-            initial="hidden"
-            whileInView="show"
-            viewport={{ once: true, margin: "-60px" }}
-            className="space-y-20 md:space-y-24"
-          >
-            <FeatureRow title="Check-in scorecard" description="One message: needs attention, streaks, and one clear recommendation from hackbitz across every goal." src="/landing/checkin-scorecard.png" alt="Check-in scorecard" imageLeft={false} />
-            <FeatureRow title="Plan and list" description="/plan and /list: today's priorities and all goals. Agents know each other so they don't overload you." src="/landing/plan-list.png" alt="Plan and list commands" imageLeft={true} />
-          </motion.div>
-        </div>
-      </section>
+      <AppStoreGallery
+        sectionTitle="Commands and shared context"
+        sectionDescription="/checkin for a snapshot across all goals. /plan for today's priorities. /list for active goals. Agents coordinate so focus stays clear."
+        items={[
+          { title: "Check-in scorecard", description: "One message: needs attention, streaks, and one clear recommendation from hackbitz across every goal.", src: "/landing/checkin-scorecard.png", alt: "Check-in scorecard" },
+          { title: "Plan and list", description: "/plan and /list: today's priorities and all goals. Agents know each other so they don't overload you.", src: "/landing/plan-list.png", alt: "Plan and list commands" },
+        ]}
+      />
 
       {/* Final CTA */}
       <section className="py-24 sm:py-32 border-t border-zinc-800/80 bg-zinc-950/80">

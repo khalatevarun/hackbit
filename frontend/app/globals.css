@@ -117,11 +117,11 @@
     @apply border-border;
   }
   html {
-    overflow-x: hidden;
+    overflow-x: clip;
   }
   body {
     @apply bg-background text-foreground;
-    overflow-x: hidden;
+    overflow-x: clip;
     min-width: 0;
   }
 }
