@@ -4,7 +4,7 @@
  */
 
 const GROQ_API_URL = "https://api.groq.com/openai/v1/chat/completions";
-const GROQ_MODEL = "llama-3.1-8b-instant";
+const GROQ_MODEL = "llama-3.3-70b-versatile";
 
 export async function groqComplete(
   systemPrompt: string,
@@ -22,7 +22,7 @@ export async function groqComplete(
         { role: "system", content: systemPrompt },
         { role: "user", content: userMessage },
       ],
-      temperature: 0.1,
+      temperature: 0.7,
       max_tokens: 512,
     }),
   });

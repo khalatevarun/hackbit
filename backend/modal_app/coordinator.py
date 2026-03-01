@@ -45,20 +45,43 @@ def _get_agent_name(goal_info: dict) -> str:
 
 CHAT_PERSONALITY_PROMPTS = {
     "roasting": (
-        "The user has chosen ROASTING mode. Your tone MUST be: sarcastic tough love, call out excuses with dry humor. "
-        "Never actually cruel — still on their side — but zero sugarcoating. Short, punchy sentences. "
-        "Sound like a friend who teases them for slacking. Use 1-2 emojis (e.g. 😤 🙄 🔥 💀). "
-        "'You're better than this' energy. No fluffy encouragement."
+        "The user has chosen ROASTING mode. You are their brutally honest, savage accountability partner. "
+        "Think Gordon Ramsay meets a drill sergeant who actually cares. "
+        "Call out every excuse like you've heard it a thousand times — because you have. "
+        "Use cutting sarcasm, dry wit, and zero tolerance for self-pity. "
+        "Short, punchy sentences. Hit hard, then hit again. "
+        "Make them feel embarrassed enough to actually do something about it. "
+        "Never cross into actual cruelty — you're roasting because you believe in them. "
+        "Use 1-2 aggressive emojis (💀 😤 🔥 🤦). "
+        "Examples of your energy: 'Oh wow, another rest day. Groundbreaking.' "
+        "'You said this was your priority. Priorities don't take days off.' "
+        "'Cool excuse. Add it to the collection.' "
+        "No fluffy words. No 'great job'. Earned praise only — and make them work for it."
     ),
     "playful": (
-        "The user has chosen PLAYFUL mode. Your tone MUST be: fun, light, encouraging with jokes and warmth. "
-        "Puns and casual language welcome. Use emojis freely (2-4 per message) to keep it lively. "
-        "Like a supportive friend who makes them smile. Keep it concise but upbeat."
+        "The user has chosen PLAYFUL mode. You are their ridiculously enthusiastic hype partner — "
+        "think golden retriever energy meets a hypeman at a concert. "
+        "Every interaction is a celebration waiting to happen. "
+        "Make jokes, use puns, be slightly unhinged with positivity. "
+        "Even setbacks are just plot twists in their epic comeback arc. "
+        "Use 3-5 emojis per message — go wild but stay coherent. "
+        "Examples of your energy: 'YOOOO you showed up today?? LEGEND BEHAVIOR 🎉🔥' "
+        "'Okay okay okay — you missed yesterday but guess who's HERE today? YOU. Let's GOOO 🚀' "
+        "'Plot twist: you're actually crushing this and just don't realize it yet 😤✨' "
+        "Keep it short, punchy, electric. Make accountability feel like a party."
     ),
     "gentle": (
-        "The user has chosen GENTLE mode. Your tone MUST be: warm, kind, supportive, no pressure. "
-        "Soft encouragement. Use 1-3 gentle emojis (e.g. 💙 🌟 ✨ 💪). "
-        "Like a caring coach. Never harsh or sarcastic."
+        "The user has chosen GENTLE mode. You are their warm, endlessly patient support system — "
+        "think caring therapist meets a best friend who genuinely believes in them, no matter what. "
+        "Every check-in is a safe space. Progress is progress, no matter how small. "
+        "Never rush them. Never compare. Never pile on guilt. "
+        "When they miss, hold space for it without judgment. Remind them that rest is part of the journey. "
+        "When they show up, celebrate quietly but genuinely. "
+        "Use 1-2 soft, warm emojis (💙 🌟 ✨ 🌱 💛). "
+        "Examples of your energy: 'Hey, just checking in on you — no pressure at all 💙' "
+        "'Missing a day doesn't erase your progress. You're still here, still trying. That matters.' "
+        "'Small steps are still steps. You're doing better than you think 🌱' "
+        "Speak softly. Be the voice they need on their hardest days."
     ),
 }
 
@@ -946,7 +969,65 @@ def handle_nightly_summary(user_id: str, llm_fn: Callable[..., str]) -> dict:
 
 
 # ---------------------------------------------------------------------------
-# Nudge and log-check message generation
+# Skip detection message
+# ---------------------------------------------------------------------------
+
+def generate_skip_message(goal: dict, stats: dict, llm_fn: Callable[..., str]) -> str:
+    """Generate a check-in message from the goal agent when a skip is detected.
+
+    Called by the cron when a user hasn't logged for a goal within the expected window.
+    The message voice is the goal agent (not hackbitz), personality-matched.
+    """
+    agent_name = goal.get("agent_name", "Goal")
+    goal_name = goal.get("name", "")
+    personality = goal.get("personality", "warm")
+    goal_type = goal.get("type", "habit")
+    config = goal.get("config") or {}
+
+    type_context = {
+        "habit": "They haven't logged anything today for this goal.",
+        "target": (
+            f"No progress logged today. "
+            f"Target: {config.get('target_count', '?')} {config.get('target_unit', '')} per day."
+        ),
+        "short_lived": "No log in the last 48 hours on this deadline goal.",
+    }.get(goal_type, "No activity logged today.")
+
+    streak = stats.get("streak_days", 0)
+    week_logged = stats.get("this_week_logged", 0)
+    week_target = stats.get("this_week_target")
+    week_str = f"{week_logged}/{week_target}" if week_target else str(week_logged)
+
+    personality_instruction = (
+        "Be direct and firm. No softening. Short and pointed — one or two sentences max."
+        if personality == "strict"
+        else "Be warm and curious. Non-judgmental. Ask what got in the way. Keep it brief."
+    )
+
+    system_prompt = (
+        f"You are {agent_name}, an accountability agent for the goal: {goal_name}. "
+        f"{personality_instruction} "
+        "Ask the user for a quick update in 1-2 sentences. "
+        "Be specific to their goal, not generic. Address them as 'you'. "
+        "Never say 'the user', 'companion', or 'agent'."
+    )
+    user_prompt = (
+        f"{type_context}\n"
+        f"Current stats: streak={streak} days, this week: {week_str} sessions.\n"
+        "Check in on them. What's going on with this goal today?"
+    )
+
+    body = llm_fn(
+        [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_prompt},
+        ],
+        0.7,
+    )
+    return f"*{agent_name}*\n\n{body}"
+
+
+# Nudge and log-check message generation (kept for demo/trigger_demo_action)
 # ---------------------------------------------------------------------------
 
 def generate_nudge_message(goal: dict, user_id: str, llm_fn: Callable[..., str]) -> str:

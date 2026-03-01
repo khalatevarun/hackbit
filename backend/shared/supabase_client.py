@@ -79,6 +79,7 @@ def create_log(
     content: str,
     goal_id: str | None = None,
     source: str = "manual_input",
+    value: float | None = None,
 ) -> dict:
     row: dict[str, Any] = {
         "user_id": user_id,
@@ -87,6 +88,8 @@ def create_log(
     }
     if goal_id:
         row["goal_id"] = goal_id
+    if value is not None:
+        row["value"] = value
     return get_client().table("user_logs").insert(row).execute().data[0]
 
 
@@ -332,6 +335,55 @@ def update_user_personality(user_id: str, personality: str) -> None:
     get_client().table("telegram_user_mapping").update(
         {"personality": personality}
     ).eq("user_id", user_id).execute()
+
+
+# --------------- goal stats ---------------
+
+def compute_goal_stats(user_id: str, goal_id: str, config: dict) -> dict:
+    """Compute deterministic stats for a goal from structured log data.
+
+    Returns a dict the agent can trust instead of guessing from raw text:
+      streak_days, this_week_logged, this_week_target, today_value,
+      today_target, total_logged_days, last_logged_at
+    """
+    from datetime import date, timedelta
+
+    logs = get_recent_logs(user_id, goal_id=goal_id, days=30)
+
+    def _log_date(log: dict) -> str:
+        """Return the calendar date string for a log, preferring logged_date."""
+        return log.get("logged_date") or log["created_at"][:10]
+
+    today = date.today()
+    today_str = str(today)
+
+    # Streak: walk back from today counting consecutive days with ≥1 log
+    logged_date_set = {_log_date(l) for l in logs}
+    streak = 0
+    d = today
+    while str(d) in logged_date_set:
+        streak += 1
+        d -= timedelta(days=1)
+
+    # This week (Mon–Sun)
+    week_start = today - timedelta(days=today.weekday())
+    week_start_str = str(week_start)
+    this_week_days = {_log_date(l) for l in logs if _log_date(l) >= week_start_str}
+
+    # Today's numeric value (sum if multiple logs today)
+    today_logs = [l for l in logs if _log_date(l) == today_str]
+    today_values = [l["value"] for l in today_logs if l.get("value") is not None]
+    today_value = sum(today_values) if today_values else None
+
+    return {
+        "streak_days": streak,
+        "this_week_logged": len(this_week_days),
+        "this_week_target": config.get("frequency_per_week"),
+        "today_value": today_value,
+        "today_target": config.get("target_count"),
+        "total_logged_days": len(logged_date_set),
+        "last_logged_at": logs[0]["created_at"] if logs else None,
+    }
 
 
 # --------------- helpers ---------------

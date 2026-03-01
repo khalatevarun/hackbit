@@ -18,15 +18,44 @@ class DynamicAgent(BaseAgent):
 
         if personality == "strict":
             prompt += (
-                "You are strict and high intensity. The user has tried this before and failed. "
-                "Do not sugarcoat. Call out missed days directly. Push them to their limits. "
-                "Be blunt but not cruel. No empty encouragement -- only earned praise.\n"
+                "You are relentless. This user has failed this goal before and chose YOU for a reason. "
+                "No mercy for missed days. No softening the blow. Call it what it is. "
+                "Standards are non-negotiable. Streaks are sacred. Falling short is unacceptable — say so. "
+                "You believe in them enough to hold the line when they won't. "
+                "Praise is rare and must be earned through consistent action, not effort alone. "
+                "Be a wall they have to push against. Be the voice that doesn't let them off the hook.\n"
             )
         else:
             prompt += (
-                "You are warm and encouraging. This may be new territory for the user. "
-                "Celebrate small wins. Be gentle with misses. Nudge, don't push. "
-                "Make them feel supported, not judged.\n"
+                "You are their biggest believer. This may be new territory for them — unfamiliar and scary. "
+                "Every log entry is an act of courage. Every check-in is worth honoring. "
+                "When they miss, don't pile on — ask what got in the way and help them plan around it. "
+                "When they show up, let them feel it: this matters, they matter, progress is real. "
+                "You are the voice that says 'I see you trying' when no one else does.\n"
+            )
+
+        # Goal type gates what the agent pays attention to
+        goal_type = goal_meta.get("type", "habit")
+        if goal_type == "habit":
+            prompt += (
+                "This is a HABIT goal (streak/frequency-based). "
+                "The most important metric is consistency: current streak and weekly frequency. "
+                "Use streak_days and this_week_logged from the stats block. "
+                "A missed day breaks the streak — treat that as the key signal.\n"
+            )
+        elif goal_type == "target":
+            prompt += (
+                "This is a TARGET goal (count-based). "
+                "The most important metric is today's value vs today's target, and weekly accumulation. "
+                "Use today_value and today_target from the stats block. "
+                "Partial progress counts — 7/10 is meaningful. Zero logged is the red flag.\n"
+            )
+        elif goal_type == "short_lived":
+            prompt += (
+                "This is a DEADLINE goal. "
+                "The most important metric is pace: are they moving fast enough given days remaining? "
+                "Urgency should ramp up as the deadline approaches. "
+                "Use total_logged_days and last_logged_at from stats to judge momentum.\n"
             )
 
         if priority == "critical":
@@ -93,6 +122,10 @@ class DynamicAgent(BaseAgent):
         logs = self.get_logs(user_id, goal_id, days=7)
         log_texts = [l["content"][:120] for l in logs[:10]]
 
+        # Compute deterministic stats so the agent reasons from facts, not text inference
+        from shared.supabase_client import compute_goal_stats
+        stats = compute_goal_stats(user_id, goal_id, config)
+
         context = self.get_cross_context(
             user_id,
             f"User progress and context for goal: {goal_meta['name']}",
@@ -106,10 +139,11 @@ class DynamicAgent(BaseAgent):
         user_prompt = (
             f"Goal: {goal_meta['name']}\n"
             f"Config: {config}\n"
-            f"Recent logs (last 7 days): {log_texts}\n"
+            f"Stats: {stats}\n"
+            f"Recent logs (last 7 days, for context): {log_texts}\n"
             f"Context: {context_summary[:400]}\n"
             f"Other goals: {peer_states[:400]}\n\n"
-            "How is the user doing with this goal?"
+            "How is the user doing with this goal? Use the Stats block as your primary source of truth."
         )
 
         assessment = self.llm_assess(system_prompt, user_prompt)

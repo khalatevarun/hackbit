@@ -61,8 +61,27 @@ GROQ_AGENT_MODEL = "llama-3.1-8b-instant"
 GROQ_COORDINATOR_MODEL = "llama-3.3-70b-versatile"
 
 
-def _llm_call(messages: list[dict], temperature: float = 0.3) -> str:
-    """LLM call for agents -- uses fast 8b model."""
+def _extract_numeric_value(text: str) -> float | None:
+    """Extract the first meaningful number from a log entry.
+
+    "did 12 problems" → 12.0, "ran 5.5km" → 5.5, "slept well" → None
+    Skips pure timestamps (e.g. '8pm', '7am') and date-like patterns.
+    """
+    import re
+    # Skip time patterns like 8pm, 7am, 10:30
+    cleaned = re.sub(r'\b\d{1,2}(?:am|pm)\b', '', text, flags=re.IGNORECASE)
+    cleaned = re.sub(r'\b\d{1,2}:\d{2}\b', '', cleaned)
+    m = re.search(r'\b(\d+(?:\.\d+)?)\b', cleaned)
+    if m:
+        v = float(m.group(1))
+        # Ignore single-digit years like "did it for 1 day" where 1 is trivial
+        # but keep it — the agent can decide if it's meaningful
+        return v
+    return None
+
+
+def _llm_call(messages: list[dict], temperature: float = 0.5) -> str:
+    """LLM call for agents -- uses fast 8b model for JSON assessments."""
     import os
     from groq import Groq
 
@@ -241,12 +260,12 @@ def tick():
     schedule=modal.Cron("*/5 * * * *"),
 )
 def scheduled_nudge_tick():
-    """Every 5 minutes: check per-goal nudge/logcheck schedules and nightly summary."""
+    """Every 5 minutes: detect skipped goals and send per-agent check-in messages."""
     sys.path.insert(0, "/root")
-    from croniter import croniter
     from shared import supabase_client as db
     from shared import telegram_client as tg
-    from modal_app.coordinator import generate_nudge_message, generate_logcheck_message, handle_nightly_summary
+    from shared.supabase_client import compute_goal_stats
+    from modal_app.coordinator import generate_skip_message, handle_nightly_summary
 
     now = datetime.now(timezone.utc)
     goals = db.get_active_goals()
@@ -263,40 +282,61 @@ def scheduled_nudge_tick():
         if not chat_id:
             continue
 
-        for goal in user_goals:
-            config = goal.get("config") or {}
+        # Skip detection only fires in the evening window (18:00–23:59 UTC)
+        # This covers most timezones for an end-of-day check-in
+        if 18 <= now.hour <= 23:
+            for goal in user_goals:
+                config = goal.get("config") or {}
+                goal_type = goal.get("type", "habit")
 
-            # Nudge schedule
-            nudge_cron = config.get("nudge_schedule")
-            if nudge_cron:
-                try:
-                    cron = croniter(nudge_cron, now)
-                    prev_fire = cron.get_prev(datetime)
-                    if prev_fire.tzinfo is None:
-                        prev_fire = prev_fire.replace(tzinfo=timezone.utc)
-                    seconds_ago = (now - prev_fire).total_seconds()
-                    if 0 <= seconds_ago < 300:
-                        msg = generate_nudge_message(goal, user_id, _llm_call_coordinator)
-                        tg.send_message(chat_id, msg)
-                except Exception as e:
-                    print(f"[nudge_tick] Nudge error for goal {goal['id'][:8]}: {e}")
+                # Dedup: one skip message per goal per day
+                recent = db.get_recent_interventions(user_id, goal_id=goal["id"], hours=20)
+                if any(i.get("intervention_type") == "skip_nudge" for i in recent):
+                    continue
 
-            # Log-check schedule
-            logcheck_cron = config.get("logcheck_schedule")
-            if logcheck_cron:
                 try:
-                    cron = croniter(logcheck_cron, now)
-                    prev_fire = cron.get_prev(datetime)
-                    if prev_fire.tzinfo is None:
-                        prev_fire = prev_fire.replace(tzinfo=timezone.utc)
-                    seconds_ago = (now - prev_fire).total_seconds()
-                    if 0 <= seconds_ago < 300:
-                        today_logs = db.get_recent_logs(user_id, goal_id=goal["id"], days=1)
-                        if not today_logs:
-                            msg = generate_logcheck_message(goal)
-                            tg.send_message(chat_id, msg)
+                    stats = compute_goal_stats(user_id, goal["id"], config)
+                    today_str = str(now.date())
+                    last_logged = stats.get("last_logged_at")
+                    last_logged_date = last_logged[:10] if last_logged else None
+                    freq = config.get("frequency_per_week")
+
+                    is_skip = False
+                    if goal_type == "short_lived":
+                        # Deadline goal: no log in 48h = skip
+                        if last_logged:
+                            from datetime import datetime as _dt
+                            last_dt = _dt.fromisoformat(last_logged.replace("Z", "+00:00"))
+                            if last_dt.tzinfo is None:
+                                last_dt = last_dt.replace(tzinfo=timezone.utc)
+                            is_skip = (now - last_dt).total_seconds() > 48 * 3600
+                        else:
+                            is_skip = True
+                    elif freq:
+                        # Frequency-based habit (e.g. gym 4x/week): behind on weekly count?
+                        week_logged = stats.get("this_week_logged", 0)
+                        days_remaining = 6 - now.weekday()  # days left in week after today
+                        needed = int(freq) - week_logged
+                        is_skip = needed > days_remaining + 1  # +1 buffer
+                    else:
+                        # Daily habit or count goal: no log today = skip
+                        is_skip = last_logged_date != today_str
+
+                    if not is_skip:
+                        continue
+
+                    msg = generate_skip_message(goal, stats, _llm_call_coordinator)
+                    tg.send_message(chat_id, msg)
+                    db.create_intervention(
+                        user_id=user_id,
+                        intervention_type="skip_nudge",
+                        reason=f"No log detected for {goal['name']}",
+                        scheduled_for=now.isoformat(),
+                        triggered_by=[goal.get("agent_name", "Goal")],
+                        goal_id=goal["id"],
+                    )
                 except Exception as e:
-                    print(f"[nudge_tick] Logcheck error for goal {goal['id'][:8]}: {e}")
+                    print(f"[nudge_tick] Skip check error for goal {goal['id'][:8]}: {e}")
 
         # Nightly summary check: derive time from sleep goal's target_bedtime or default 22:00
         summary_hour = 22
@@ -612,99 +652,24 @@ def telegram_webhook(body: dict):
             if len(parts) == 4:
                 goal_id = parts[2]
                 experience = parts[3]
+                goals = db.get_active_goals(user_id=user_id)
+                goal = next((g for g in goals if g["id"] == goal_id), None)
+                agent_name = goal.get("agent_name", "Goal") if goal else "Goal"
                 if experience == "failed":
                     db.update_goal_meta(goal_id, {"personality": "strict", "priority": "high"})
-                    send_message_with_buttons(
+                    send_message(
                         chat_id,
-                        "⚡ *hackbitz*\n\nUnderstood — I'll be direct with you on this one. 💪\nWhen should I nudge you about this?",
-                        [
-                            [
-                                {"text": "Every morning 9am", "callback_data": f"addgoal:nudge:{goal_id}:9am"},
-                                {"text": "Every evening 7pm", "callback_data": f"addgoal:nudge:{goal_id}:7pm"},
-                            ],
-                            [{"text": "Custom", "callback_data": f"addgoal:nudge:{goal_id}:custom"}],
-                        ],
+                        f"⚡ *hackbitz*\n\nUnderstood — *{agent_name}* will be direct with you. No going easy. 💪\n\n"
+                        "Just log updates anytime — I'll check in automatically if I notice a gap.",
                     )
                 else:
                     db.update_goal_meta(goal_id, {"personality": "warm", "priority": "normal"})
-                    send_message_with_buttons(
+                    send_message(
                         chat_id,
-                        "⚡ *hackbitz*\n\nGot it — I'll keep things encouraging. 🌟\nWhen should I nudge you about this?",
-                        [
-                            [
-                                {"text": "Every morning 9am", "callback_data": f"addgoal:nudge:{goal_id}:9am"},
-                                {"text": "Every evening 7pm", "callback_data": f"addgoal:nudge:{goal_id}:7pm"},
-                            ],
-                            [{"text": "Custom", "callback_data": f"addgoal:nudge:{goal_id}:custom"}],
-                        ],
+                        f"⚡ *hackbitz*\n\nGot it — *{agent_name}* has your back. 🌟\n\n"
+                        "Just log updates anytime — I'll check in automatically if I notice a gap.",
                     )
             return {"status": "ok", "callback": "addgoal_exp"}
-
-        # addgoal:nudge:<goal_id>:<time>
-        if data.startswith("addgoal:nudge:"):
-            parts = data.split(":")
-            if len(parts) == 4:
-                goal_id = parts[2]
-                time_choice = parts[3]
-                cron_map = {"9am": "0 9 * * *", "7pm": "0 19 * * *"}
-                if time_choice == "custom":
-                    send_message(chat_id, "⚡ *hackbitz*\n\nTell me when you want the nudge (e.g. 'daily 8am', 'every morning 6am'). ⏰")
-                    return {"status": "ok", "callback": "addgoal_nudge_custom"}
-                cron_expr = cron_map.get(time_choice, "0 9 * * *")
-                goals = db.get_active_goals(user_id=user_id)
-                goal = next((g for g in goals if g["id"] == goal_id), None)
-                if goal:
-                    config = goal.get("config") or {}
-                    config["nudge_schedule"] = cron_expr
-                    db.update_goal_config(goal_id, config)
-                send_message_with_buttons(
-                    chat_id,
-                    "⚡ *hackbitz*\n\nAnd when should I check if you logged progress? 📋",
-                    [
-                        [
-                            {"text": "Daily 10pm", "callback_data": f"addgoal:logcheck:{goal_id}:10pm"},
-                            {"text": "Daily 8pm", "callback_data": f"addgoal:logcheck:{goal_id}:8pm"},
-                        ],
-                        [{"text": "Custom", "callback_data": f"addgoal:logcheck:{goal_id}:custom"}],
-                    ],
-                )
-            return {"status": "ok", "callback": "addgoal_nudge"}
-
-        # addgoal:logcheck:<goal_id>:<time>
-        if data.startswith("addgoal:logcheck:"):
-            parts = data.split(":")
-            if len(parts) == 4:
-                goal_id = parts[2]
-                time_choice = parts[3]
-                cron_map = {"10pm": "0 22 * * *", "8pm": "0 20 * * *"}
-                if time_choice == "custom":
-                    send_message(chat_id, "⚡ *hackbitz*\n\nTell me when you want the log check (e.g. 'daily 10pm', 'every evening 9pm'). ⏰")
-                    return {"status": "ok", "callback": "addgoal_logcheck_custom"}
-                cron_expr = cron_map.get(time_choice, "0 22 * * *")
-                goals = db.get_active_goals(user_id=user_id)
-                goal = next((g for g in goals if g["id"] == goal_id), None)
-                agent_name = "Goal"
-                nudge_label = ""
-                if goal:
-                    config = goal.get("config") or {}
-                    config["logcheck_schedule"] = cron_expr
-                    db.update_goal_config(goal_id, config)
-                    agent_name = goal.get("agent_name", "Goal")
-                    nudge_cron = config.get("nudge_schedule", "")
-                    if "9" in nudge_cron:
-                        nudge_label = "9am"
-                    elif "19" in nudge_cron:
-                        nudge_label = "7pm"
-                    else:
-                        nudge_label = "your chosen time"
-
-                personality = goal.get("personality", "warm") if goal else "warm"
-                closing = "No going easy on you." if personality == "strict" else "I've got your back."
-                send_message(
-                    chat_id,
-                    f"⚡ *hackbitz*\n\nAll set! {agent_name} will remind you at {nudge_label} and check in at {time_choice}. ✅\n{closing}",
-                )
-            return {"status": "ok", "callback": "addgoal_logcheck"}
 
         # adjust:yes:<goal_id> / adjust:no:<goal_id>
         if data.startswith("adjust:yes:"):
@@ -830,17 +795,10 @@ def telegram_webhook(body: dict):
         )
 
         if has_deadline:
-            # Deadline goals skip experience question, go straight to nudge schedule
-            send_message_with_buttons(
+            # Deadline goals: confirm immediately, cron handles check-ins
+            send_message(
                 chat_id,
-                confirm_msg + "\nWhen should I nudge you about this?",
-                [
-                    [
-                        {"text": "Every morning 9am", "callback_data": f"addgoal:nudge:{goal_id}:9am"},
-                        {"text": "Every evening 7pm", "callback_data": f"addgoal:nudge:{goal_id}:7pm"},
-                    ],
-                    [{"text": "Custom", "callback_data": f"addgoal:nudge:{goal_id}:custom"}],
-                ],
+                confirm_msg + "\n\nI'll check in automatically if you go quiet. Deadline is on the clock. ⏳",
             )
         else:
             # Non-deadline goals: ask experience question first
@@ -868,16 +826,17 @@ def telegram_webhook(body: dict):
     if text.startswith("/"):
         return {"status": "ignored", "reason": "unknown command"}
 
-    # --- Text log: classify -> save -> spawn reactive analysis ---
-    classified_goal_id = None
-    confidence = 0.0
+    # --- Text log: multi-goal split -> save per-goal logs -> spawn reactive analysis ---
+    import json, re
     goals = db.get_active_goals(user_id=user_id)
-    try:
-        if goals:
-            goal_list = "\n".join(
-                f"- id: {g['id']} | name: \"{g['name']}\" | agent: {g.get('agent_name', 'Goal')}"
-                for g in goals
-            )
+    splits = []  # list of {goal_id, segment, confidence}
+
+    if goals:
+        goal_list = "\n".join(
+            f"- id: {g['id']} | name: \"{g['name']}\" | agent: {g.get('agent_name', 'Goal')}"
+            for g in goals
+        )
+        try:
             groq_client = Groq(api_key=os.environ["GROQ_API_KEY"])
             resp = groq_client.chat.completions.create(
                 model=GROQ_AGENT_MODEL,
@@ -885,16 +844,17 @@ def telegram_webhook(body: dict):
                     {
                         "role": "system",
                         "content": (
-                            "Match the user's journal entry to the most relevant active goal. "
+                            "Analyze the user's message and identify which parts relate to which active goals. "
+                            "A single message may contain updates about multiple goals — extract each separately. "
                             "Return ONLY valid JSON: "
-                            '{"goal_id": "<best matching goal id or null>", '
-                            '"confidence": <0.0-1.0 how sure you are>, '
-                            '"reason": "<one short phrase explaining the match>"}\n\n'
+                            '{"splits": [{"goal_id": "<goal id>", "segment": "<the relevant part of the message>", "confidence": <0.0-1.0>}]}\n\n'
                             "Rules:\n"
-                            "- Always pick the single best match if one exists, even if uncertain.\n"
-                            "- confidence >= 0.7 means you're sure it fits.\n"
-                            "- confidence < 0.7 means it's a guess.\n"
-                            "- If truly nothing fits at all, return goal_id: null with confidence: 0."
+                            "- Extract one split per goal that is genuinely referenced.\n"
+                            "- segment is the specific portion of the message relevant to that goal.\n"
+                            "- confidence >= 0.7 means you're sure this part is about that goal.\n"
+                            "- If only one goal is mentioned, return one split.\n"
+                            "- If nothing matches any goal, return splits: [].\n"
+                            "- Never force a match. Only include goals clearly referenced."
                         ),
                     },
                     {
@@ -903,26 +863,64 @@ def telegram_webhook(body: dict):
                     },
                 ],
                 temperature=0.1,
-                max_tokens=128,
+                max_tokens=256,
             )
-            import json, re
             raw = resp.choices[0].message.content.strip()
             raw = re.sub(r"^```(?:json)?\s*\n?", "", raw)
             raw = re.sub(r"\n?```\s*$", "", raw)
             parsed = json.loads(raw)
-            gid = parsed.get("goal_id")
-            confidence = float(parsed.get("confidence", 0.0))
-            if gid and any(g["id"] == gid for g in goals):
-                classified_goal_id = gid
-    except Exception as e:
-        print(f"[telegram_webhook] Classification error: {e}")
+            goal_ids_set = {g["id"] for g in goals}
+            for sp in parsed.get("splits", []):
+                gid = sp.get("goal_id")
+                if gid and gid in goal_ids_set:
+                    splits.append({
+                        "goal_id": gid,
+                        "segment": sp.get("segment", text),
+                        "confidence": float(sp.get("confidence", 0.0)),
+                    })
+        except Exception as e:
+            print(f"[telegram_webhook] Multi-split classification error: {e}")
+
+    high_conf = [s for s in splits if s["confidence"] >= 0.7]
+
+    # --- Multi-goal path: 2+ confident matches ---
+    if len(high_conf) >= 2:
+        goal_map = {g["id"]: g for g in goals}
+        agent_names = []
+        trigger_logs_map = {}
+        for sp in high_conf:
+            gid = sp["goal_id"]
+            segment = sp["segment"]
+            extracted_value = _extract_numeric_value(segment)
+            db.create_log(user_id=user_id, content=segment, goal_id=gid, source="manual_input", value=extracted_value)
+            goal_info = goal_map.get(gid, {})
+            agent_names.append(goal_info.get("agent_name", goal_info.get("name", "Goal")))
+            trigger_logs_map[gid] = segment
+
+        agents_str = ", ".join(agent_names)
+        send_message(chat_id, f"⚡ *hackbitz*\n\nGot it — split across {len(high_conf)} goals: _{agents_str}_. Agents checking in... ⚡")
+        source_goal_ids = [sp["goal_id"] for sp in high_conf]
+        _tick_for_user.spawn(user_id, "multi_reactive_log", None, None, source_goal_ids, trigger_logs_map)
+        return {"status": "ok", "goal_ids": source_goal_ids, "multi": True}
+
+    # --- Single-goal path (existing behavior) ---
+    classified_goal_id = None
+    confidence = 0.0
+    if high_conf:
+        classified_goal_id = high_conf[0]["goal_id"]
+        confidence = high_conf[0]["confidence"]
+    elif splits:
+        best = max(splits, key=lambda s: s["confidence"])
+        classified_goal_id = best["goal_id"]
+        confidence = best["confidence"]
 
     if confidence >= 0.7 or not goals:
-        log = db.create_log(
+        db.create_log(
             user_id=user_id,
             content=text,
             goal_id=classified_goal_id,
             source="manual_input",
+            value=_extract_numeric_value(text),
         )
         print(f"[telegram_webhook] Saved log (confident), goal_id={classified_goal_id}")
         _tick_for_user.spawn(user_id, "reactive_log", classified_goal_id, text)
@@ -974,6 +972,8 @@ def _tick_for_user(
     mode: str = "pattern_check",
     source_goal_id: str | None = None,
     trigger_log: str | None = None,
+    source_goal_ids: list[str] | None = None,
+    trigger_logs_map: dict | None = None,
 ) -> None:
     """Internal: run agents + coordinator for one user. Called via spawn."""
     sys.path.insert(0, "/root")
@@ -1012,6 +1012,24 @@ def _tick_for_user(
             source_goal_id=source_goal_id,
             trigger_log=trigger_log,
         )
+        list(run_agent_for_goal.map(active_goals))
+    elif mode == "multi_reactive_log" and source_goal_ids:
+        # Bootstrap agent state for any goal that doesn't have one yet
+        existing = db.get_agent_states_for_user(user_id)
+        existing_gids = {s["goal_id"] for s in existing}
+        to_bootstrap = [g for g in active_goals if g["id"] in source_goal_ids and g["id"] not in existing_gids]
+        if to_bootstrap:
+            list(run_agent_for_goal.map(to_bootstrap))
+        # Each goal's agent responds independently with its own persona
+        for gid in source_goal_ids:
+            segment = (trigger_logs_map or {}).get(gid)
+            coordinate_for_user(
+                user_id,
+                llm_fn=_llm_call_coordinator,
+                mode="reactive_log",
+                source_goal_id=gid,
+                trigger_log=segment,
+            )
         list(run_agent_for_goal.map(active_goals))
     else:
         list(run_agent_for_goal.map(active_goals))

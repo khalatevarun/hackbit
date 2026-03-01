@@ -2,8 +2,6 @@
 
 import Link from "next/link";
 import { useCallback, useEffect, useState } from "react";
-import { GoalForm } from "@/components/goal-form";
-import { ActivityLog } from "@/components/activity-log";
 import { AgentChat } from "@/components/agent-chat";
 import { AgentMemory } from "@/components/agent-memory";
 import { Badge } from "@/components/ui/badge";
@@ -223,25 +221,9 @@ export default function DashboardPage() {
       </header>
 
       <main className="container mx-auto px-4 py-8">
-        <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+        <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
 
-          {/* Left column: add goal + share update */}
-          <div className="space-y-4">
-            <div>
-              <p className="text-xs font-medium text-muted-foreground uppercase tracking-wide mb-2 px-1">
-                New goal
-              </p>
-              <GoalForm onCreated={fetchGoals} />
-            </div>
-            <div>
-              <p className="text-xs font-medium text-muted-foreground uppercase tracking-wide mb-2 px-1">
-                Share an update
-              </p>
-              <ActivityLog onLogged={fetchLogs} />
-            </div>
-          </div>
-
-          {/* Middle column: goals + recent updates */}
+          {/* Left column: goals + recent updates */}
           <div className="space-y-6">
             <Card>
               <CardHeader className="pb-3">
@@ -257,7 +239,7 @@ export default function DashboardPage() {
               <CardContent className="space-y-2">
                 {activeGoals.length === 0 && (
                   <p className="text-sm text-muted-foreground text-center py-4">
-                    Add your first goal above to get started.
+                    Add goals via Telegram to get started.
                   </p>
                 )}
                 {activeGoals.map((goal) => (
@@ -292,7 +274,7 @@ export default function DashboardPage() {
                   <CardContent className="pt-4 space-y-3 max-h-80 overflow-y-auto">
                     {logs.length === 0 && (
                       <p className="text-sm text-muted-foreground text-center py-4">
-                        No updates yet — share what&apos;s going on.
+                        No updates yet — send a message in Telegram to log.
                       </p>
                     )}
                     {logs.map((log) => (

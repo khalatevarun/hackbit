@@ -33,17 +33,22 @@ sys.path.insert(0, str(Path(__file__).parent))
 
 from shared import supabase_client as db
 
-MOCK_USER_ID = "00000000-0000-0000-0000-000000000001"
+MOCK_USER_ID = "9627743a-ae5b-457d-99ca-a535999a375d"
 
 
 def reset(client):
-    """Wipe all existing data for the demo user."""
+    """Wipe all existing data for the demo user (Supabase + Supermemory)."""
     print("Resetting existing demo data...")
     client.table("agent_messages").delete().eq("user_id", MOCK_USER_ID).execute()
     client.table("agent_states").delete().eq("user_id", MOCK_USER_ID).execute()
     client.table("interventions").delete().eq("user_id", MOCK_USER_ID).execute()
     client.table("user_logs").delete().eq("user_id", MOCK_USER_ID).execute()
     client.table("goals").delete().eq("user_id", MOCK_USER_ID).execute()
+    try:
+        from reset_user import wipe_supermemory
+        wipe_supermemory(MOCK_USER_ID)
+    except Exception as e:
+        print(f"  Supermemory wipe skipped: {e}")
     print("  Done.\n")
 
 
@@ -57,7 +62,7 @@ def seed(do_reset: bool = False):
     print("Seeding 'The ML Assignment That Ate My Life' scenario...\n")
 
     # ------------------------------------------------------------------
-    # 1. Goals
+    # 1. Goals (full metadata: agent_name, personality, priority, domain_topics, schedules)
     # ------------------------------------------------------------------
     print("Creating goals...")
 
@@ -66,7 +71,16 @@ def seed(do_reset: bool = False):
         name="Sleep 7h/night",
         goal_type="habit",
         agent_template="sleep",
-        config={"target_hours": 7, "target_bedtime": "23:30"},
+        agent_name="Sleep",
+        personality="warm",
+        priority="normal",
+        config={
+            "target_hours": 7,
+            "target_bedtime": "23:30",
+            "domain_topics": ["sleep hygiene", "circadian rhythm"],
+            "nudge_schedule": "0 9 * * *",
+            "logcheck_schedule": "0 22 * * *",
+        },
     )
 
     fitness_goal = db.create_goal(
@@ -74,7 +88,16 @@ def seed(do_reset: bool = False):
         name="Run 4x/week (training for 5K)",
         goal_type="habit",
         agent_template="fitness",
-        config={"frequency_per_week": 4, "target": "running"},
+        agent_name="Run",
+        personality="warm",
+        priority="normal",
+        config={
+            "frequency_per_week": 4,
+            "target": "running",
+            "domain_topics": ["5K training", "running consistency"],
+            "nudge_schedule": "0 7 * * *",
+            "logcheck_schedule": "0 20 * * *",
+        },
     )
 
     money_goal = db.create_goal(
@@ -82,7 +105,14 @@ def seed(do_reset: bool = False):
         name="Stay under $150/week",
         goal_type="habit",
         agent_template="money",
-        config={"weekly_budget": 150, "watch_categories": ["food delivery", "coffee", "snacks"]},
+        agent_name="Budget",
+        personality="warm",
+        priority="normal",
+        config={
+            "weekly_budget": 150,
+            "watch_categories": ["food delivery", "coffee", "snacks"],
+            "domain_topics": ["budgeting", "saving money"],
+        },
     )
 
     social_goal = db.create_goal(
@@ -90,7 +120,13 @@ def seed(do_reset: bool = False):
         name="Stay connected — family + friends 3x/week",
         goal_type="habit",
         agent_template="social",
-        config={"min_social_per_week": 3},
+        agent_name="Connect",
+        personality="warm",
+        priority="normal",
+        config={
+            "min_social_per_week": 3,
+            "domain_topics": ["staying social", "relationships"],
+        },
     )
 
     assignment_goal = db.create_goal(
@@ -98,12 +134,16 @@ def seed(do_reset: bool = False):
         name="Submit ML assignment (due Friday)",
         goal_type="short_lived",
         agent_template="short_lived",
+        agent_name="ML Assignment",
+        personality="strict",
+        priority="critical",
         config={
             "end_date": (now + timedelta(days=3)).strftime("%Y-%m-%d"),
             "success_criteria": (
                 "Implement a multi-class classifier on the CIFAR-10 dataset, "
                 "write a 4-page report, and submit to Gradescope by Friday 11:59pm"
             ),
+            "domain_topics": ["study habits", "deadline management"],
         },
         end_at=(now + timedelta(days=3)).isoformat(),
     )
@@ -219,12 +259,223 @@ def seed(do_reset: bool = False):
             "content": content,
             "source": "manual_input",
             "created_at": logged_at,
+            "logged_date": logged_at[:10],  # match schema 007: date for streak/frequency
         }
         if goal_id:
             row["goal_id"] = goal_id
         client.table("user_logs").insert(row).execute()
 
     print("Done.\n")
+
+    # ------------------------------------------------------------------
+    # 3. Agent states (one row per goal: state + state_history for dashboard)
+    # ------------------------------------------------------------------
+    print("Seeding agent states...")
+
+    def state_history_entries(next_actions: list[str], confidences: list[float]) -> list[dict]:
+        """Build state_history with 7 entries over last 2-3 days."""
+        entries = []
+        for i, (action, conf) in enumerate(zip(next_actions, confidences)):
+            # Spread over 3 days: 3 entries at day 3, 2 at day 2, 2 at day 1
+            if i < 3:
+                ts = at(3, 8 + i * 4)
+            elif i < 5:
+                ts = at(2, 10 + (i - 3) * 6)
+            else:
+                ts = at(1, 8 + (i - 5) * 6)
+            entries.append({"next_action": action, "confidence": conf, "updated_at": ts})
+        return entries[-7:]
+
+    sleep_history = state_history_entries(
+        ["nudge", "call", "call", "escalate", "escalate", "escalate", "escalate"],
+        [0.7, 0.78, 0.85, 0.88, 0.9, 0.92, 0.92],
+    )
+    client.table("agent_states").upsert(
+        {
+            "user_id": MOCK_USER_ID,
+            "goal_id": sid,
+            "state": {
+                "status": "concerned",
+                "next_action": "escalate",
+                "context_summary": "Six consecutive nights under 6h. Bedtime shifted later each night. Last night 2h after all-nighter.",
+                "confidence": 0.92,
+                "last_checkin": at(1, 8),
+            },
+            "state_history": sleep_history,
+            "updated_at": now.isoformat(),
+        },
+        on_conflict="user_id,goal_id",
+    ).execute()
+
+    fitness_history = state_history_entries(
+        ["monitor", "nudge", "nudge", "nudge", "nudge", "nudge", "nudge"],
+        [0.6, 0.65, 0.72, 0.78, 0.82, 0.85, 0.85],
+    )
+    client.table("agent_states").upsert(
+        {
+            "user_id": MOCK_USER_ID,
+            "goal_id": fid,
+            "state": {
+                "status": "concerned",
+                "next_action": "nudge",
+                "context_summary": "Four runs skipped in a row during assignment crunch. Sleep agent escalated so backing off; suggest walk instead of push.",
+                "confidence": 0.85,
+                "last_checkin": at(1, 10),
+            },
+            "state_history": fitness_history,
+            "updated_at": now.isoformat(),
+        },
+        on_conflict="user_id,goal_id",
+    ).execute()
+
+    money_history = state_history_entries(
+        ["monitor", "nudge", "call", "call", "call", "call", "call"],
+        [0.5, 0.65, 0.75, 0.82, 0.88, 0.9, 0.9],
+    )
+    client.table("agent_states").upsert(
+        {
+            "user_id": MOCK_USER_ID,
+            "goal_id": mid,
+            "state": {
+                "status": "concerned",
+                "next_action": "call",
+                "context_summary": "Weekly spend $187, $37 over budget. DoorDash and Red Bull spike during deadline week.",
+                "confidence": 0.9,
+                "last_checkin": at(1, 9),
+            },
+            "state_history": money_history,
+            "updated_at": now.isoformat(),
+        },
+        on_conflict="user_id,goal_id",
+    ).execute()
+
+    social_history = state_history_entries(
+        ["monitor", "monitor", "nudge", "nudge", "nudge", "nudge", "nudge"],
+        [0.6, 0.65, 0.7, 0.75, 0.78, 0.8, 0.8],
+    )
+    client.table("agent_states").upsert(
+        {
+            "user_id": MOCK_USER_ID,
+            "goal_id": soid,
+            "state": {
+                "status": "concerned",
+                "next_action": "nudge",
+                "context_summary": "Missed mom's call; replied in group chat but avoiding calls. Priya checked in; user isolated during crunch.",
+                "confidence": 0.8,
+                "last_checkin": at(1, 12),
+            },
+            "state_history": social_history,
+            "updated_at": now.isoformat(),
+        },
+        on_conflict="user_id,goal_id",
+    ).execute()
+
+    assignment_history = state_history_entries(
+        ["nudge", "call", "call", "call", "call", "call", "call"],
+        [0.6, 0.75, 0.82, 0.88, 0.9, 0.92, 0.92],
+    )
+    client.table("agent_states").upsert(
+        {
+            "user_id": MOCK_USER_ID,
+            "goal_id": aid,
+            "state": {
+                "status": "concerned",
+                "next_action": "call",
+                "context_summary": "Model at 80.3%, report submitted. Assignment done; user recovering from all-nighter.",
+                "confidence": 0.92,
+                "last_checkin": at(1, 12),
+            },
+            "state_history": assignment_history,
+            "updated_at": now.isoformat(),
+        },
+        on_conflict="user_id,goal_id",
+    ).execute()
+
+    print("Done.\n")
+
+    # ------------------------------------------------------------------
+    # 4. Agent messages (companion chat history with optional Exa-style link cards)
+    # ------------------------------------------------------------------
+    print("Seeding agent messages...")
+
+    agent_messages_data = [
+        (at(3, 10), f"Sleep:{sid}", sid, "You've had several short nights in a row. I'd rather see you get one solid 7h than push through.", {"content_suggestions": [{"title": "Sleep hygiene during busy periods", "url": "https://example.com/sleep-busy", "snippet": "Short evidence-based tips to protect sleep when deadlines loom."}]}),
+        (at(3, 15), f"Budget:{mid}", mid, "DoorDash and Red Bull are adding up. When the assignment is over we can reset; for now maybe one delivery day and batch the rest?", None),
+        (at(2, 21), f"ML Assignment:{aid}", aid, "Report is the bottleneck. Model is in good shape. Even one page tonight will take the pressure off tomorrow.", {"content_suggestions": [{"title": "Writing under deadline", "url": "https://example.com/writing-deadline", "snippet": "How to get words on the page when you're tired."}]}),
+        (at(2, 11), f"Run:{fid}", fid, "I see Sleep is having a rough week. Skip the long run if you need to — a 15-minute walk still counts as moving. We can ramp back up after Friday.", None),
+        (at(2, 18), f"Connect:{soid}", soid, "Your mom called and you didn't pick up. When you have five minutes, even a short call will help. She's worried.", None),
+        (at(1, 9), f"Sleep:{sid}", sid, "Two hours of sleep isn't sustainable. Now that the assignment is in, please prioritize rest. I'm not going to nag about runs or budget today.", None),
+    ]
+    for created_at, from_agent, goal_id, message, context in agent_messages_data:
+        row = {
+            "user_id": MOCK_USER_ID,
+            "from_agent": from_agent,
+            "message": message,
+            "goal_id": goal_id,
+            "created_at": created_at,
+        }
+        if context:
+            row["context"] = context
+        client.table("agent_messages").insert(row).execute()
+
+    print("Done.\n")
+
+    # ------------------------------------------------------------------
+    # 5. Interventions (optional: 1-2 executed so dedup feels warm)
+    # ------------------------------------------------------------------
+    print("Seeding interventions...")
+    scheduled_1 = (now - timedelta(hours=4)).isoformat()
+    delivered_1 = (now - timedelta(hours=3)).isoformat()
+    client.table("interventions").insert(
+        {
+            "user_id": MOCK_USER_ID,
+            "goal_id": sid,
+            "triggered_by": ["Sleep"],
+            "intervention_type": "nudge",
+            "reason": "3+ consecutive ticks concerned about sleep.",
+            "scheduled_for": scheduled_1,
+            "executed": True,
+            "delivered_at": delivered_1,
+        }
+    ).execute()
+    client.table("interventions").insert(
+        {
+            "user_id": MOCK_USER_ID,
+            "goal_id": aid,
+            "triggered_by": ["ML Assignment"],
+            "intervention_type": "call",
+            "reason": "Report not started, deadline in 2 days.",
+            "scheduled_for": (now - timedelta(hours=8)).isoformat(),
+            "executed": True,
+            "delivered_at": (now - timedelta(hours=7)).isoformat(),
+        }
+    ).execute()
+    print("Done.\n")
+
+    # ------------------------------------------------------------------
+    # 6. Supermemory: seed agent observations for cross-goal context
+    # ------------------------------------------------------------------
+    if os.environ.get("SUPERMEMORY_API_KEY"):
+        print("Seeding Supermemory (agent observations)...")
+        try:
+            from shared import supermemory_client as mem
+            observations = [
+                (sid, "sleep", "User has had 6 consecutive nights under 6h. Bedtime shifted later each night. Last night 2h after all-nighter."),
+                (fid, "fitness", "Four runs skipped in a row during assignment crunch. Sleep agent escalated so backing off; suggest walk instead of push."),
+                (mid, "money", "Weekly spend $187, $37 over budget. DoorDash and Red Bull spike during deadline week."),
+                (soid, "social", "Missed mom's call; replied in group chat but avoiding calls. Priya checked in; user isolated during crunch."),
+                (aid, "short_lived", "Model at 80.3%, report submitted. Assignment done; user recovering from all-nighter."),
+            ]
+            for goal_id, agent_template, observation in observations:
+                mem.add_agent_observation(
+                    MOCK_USER_ID, goal_id, agent_template, observation,
+                    observation_type="pattern_detected", confidence=0.85,
+                )
+            print("Done.\n")
+        except Exception as e:
+            print(f"  Supermemory seed skipped: {e}\n")
+    else:
+        print("SUPERMEMORY_API_KEY not set — skipping Supermemory seed.\n")
 
     # Optional: link one Telegram chat to the demo user so that chat sees seeded data
     telegram_chat_id = os.environ.get("TELEGRAM_CHAT_ID", "").strip()
@@ -239,14 +490,18 @@ def seed(do_reset: bool = False):
     print("DEMO SCENARIO: 'The ML Assignment That Ate My Life'")
     print("=" * 65)
     print()
-    print("5 goals created:")
+    print("5 goals created (with agent_name, personality, priority, domain_topics):")
     print(f"  Sleep       → {sid[:8]}...")
-    print(f"  Fitness     → {fid[:8]}...")
-    print(f"  Money       → {mid[:8]}...")
-    print(f"  Social      → {soid[:8]}...")
-    print(f"  Assignment  → {aid[:8]}...  (due: {(now + timedelta(days=3)).strftime('%A %b %d')})")
+    print(f"  Run         → {fid[:8]}...")
+    print(f"  Budget      → {mid[:8]}...")
+    print(f"  Connect     → {soid[:8]}...")
+    print(f"  ML Assignment → {aid[:8]}...  (due: {(now + timedelta(days=3)).strftime('%A %b %d')})")
     print()
     print(f"  {len(logs)} log entries across 10 days")
+    print("  5 agent states (with state_history)")
+    print("  6 agent messages (companion chat, some with link cards)")
+    print("  2 interventions (executed)")
+    print("  Supermemory: agent observations (if SUPERMEMORY_API_KEY set)")
     print()
     print("WHAT TO EXPECT FROM AGENTS:")
     print()
@@ -269,12 +524,12 @@ def seed(do_reset: bool = False):
     print("               Surfaces Exa links on healthy crunch habits.")
     print()
     print("DEMO SCRIPT:")
-    print("  1. Show 5 active goals.")
-    print("  2. Click 'Check in now' — companions respond.")
-    print("  3. Show Exa link cards under sleep/fitness messages.")
-    print("  4. Send a message to @hackbitz_bot: 'finally slept 7h last night'")
-    print("  5. Watch the bot reply — agents update their assessment.")
-    print("  6. Expand 'Why they said that' to show cross-agent awareness.")
+    print("  1. Open dashboard — see 5 goals, agent status labels, and companion messages.")
+    print("  2. Show goals with agent names (Sleep, Run, Budget, Connect, ML Assignment).")
+    print("  3. Show companion chat with past messages and link cards.")
+    print("  4. Click 'Check in now' or trigger trigger-demo — new messages and updated states.")
+    print("  5. If using Telegram: send a log or /checkin; bot replies with context.")
+    print("  6. Send to @hackbitz_bot: 'finally slept 7h last night' — agents update assessment.")
     print("=" * 65)
 
 

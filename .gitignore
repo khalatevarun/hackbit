@@ -25,3 +25,13 @@ out/
 .DS_Store
 *.swp
 *.swo
+
+# Landing page WhatsApp/screenshot images (keep locally, don't push)
+frontend/public/landing/agent-per-goal.png
+frontend/public/landing/add-goal-cuda.png
+frontend/public/landing/add-goal-leetcode.png
+frontend/public/landing/checkin-scorecard.png
+frontend/public/landing/cuda-agent-exa.png
+frontend/public/landing/leetcode-burnout-exa.png
+frontend/public/landing/log-classification.png
+frontend/public/landing/plan-list.png
